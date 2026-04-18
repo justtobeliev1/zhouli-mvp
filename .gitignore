@@ -6,6 +6,7 @@
 *.env
 *.secret
 *.key
+config.local.js
 
 # Logs
 *.log
