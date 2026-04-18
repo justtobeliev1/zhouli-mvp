@@ -42,15 +42,22 @@
         <footer class="composer-area">
           <div class="prompt-box">
             <label class="sr-only" for="userInput">输入你的处境</label>
+            <input id="imageInput" class="sr-only" type="file" accept="image/*" />
             <textarea
               id="userInput"
               maxlength="120"
               placeholder="有问题，尽管问。比如：朋友鸽我两次还问我在不在"
             ></textarea>
+            <div id="attachmentPreview" class="attachment-preview" hidden aria-live="polite"></div>
 
             <div class="prompt-row">
               <div class="prompt-left">
                 <span id="charCount" aria-live="polite">0 / 120</span>
+                <button id="attachImageBtn" class="text-btn" type="button">上传图片</button>
+                <label class="checkbox-label" for="generateMemeCheckbox">
+                  <input type="checkbox" id="generateMemeCheckbox" />
+                  附带夸张孔子梗图
+                </label>
                 <button id="downloadCardBtn" class="text-btn" type="button">导出图卡</button>
                 <button id="copySkillPromptBtn" class="text-btn" type="button">复制 Skill 提示词</button>
               </div>
