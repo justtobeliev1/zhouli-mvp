@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>合乎周礼</title>
+    <meta
+      name="description"
+      content="把年轻人的现代处境翻译成古人判词卡，一句话输入，秒出真引、意译、戏仿。"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Sans+SC:wght@400;500;700;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+
+  <body>
+    <div class="app-layout">
+      <main class="workspace">
+        <header class="topbar">
+          <div class="topbar-title">
+            <span class="brand">合乎周礼</span>
+            <span class="badge">判词引擎</span>
+          </div>
+        </header>
+
+        <section id="chatViewport" class="chat-viewport" aria-label="对话区">
+          <section id="emptyState" class="empty-state" aria-label="首页引导">
+            <div class="hero-poster" aria-hidden="true"></div>
+            <div class="hero-copy">
+              <h1>这合乎周礼吗？</h1>
+              <p class="hero-main-copy">把你的现代破事端上来，让夫子为你评评理。</p>
+            </div>
+          </section>
+
+          <section id="messageList" class="message-list" aria-label="消息列表"></section>
+        </section>
+
+        <footer class="composer-area">
+          <div class="prompt-box">
+            <label class="sr-only" for="userInput">输入你的处境</label>
+            <textarea
+              id="userInput"
+              maxlength="120"
+              placeholder="有问题，尽管问。比如：朋友鸽我两次还问我在不在"
+            ></textarea>
+
+            <div class="prompt-row">
+              <div class="prompt-left">
+                <span id="charCount" aria-live="polite">0 / 120</span>
+                <button id="downloadCardBtn" class="text-btn" type="button">导出图卡</button>
+              </div>
+              <button id="sendBtn" class="send-btn" type="button">发送</button>
+            </div>
+          </div>
+
+          <div class="hint-area">
+            <div id="presetButtons" class="preset-buttons" aria-label="引导提问"></div>
+            <p id="statusText" role="status" aria-live="polite">等待输入</p>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <script src="./style-presets.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
