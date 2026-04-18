@@ -11,12 +11,12 @@
         accent: "#ffe5c6",
         accentSoft: "rgba(255,229,198,0.18)",
         border: "rgba(248,228,206,0.3)",
-        modeColor: {
-          true: "#ffd9ab",
-          mix: "#ffecc8",
-          parody: "#ffcc95",
-        },
         warn: "#e56a45",
+      },
+      modeColor: {
+        true: "#ffd9ab",
+        mix: "#ffecc8",
+        parody: "#ffcc95",
       },
       fonts: {
         brand: '"Noto Sans SC", sans-serif',

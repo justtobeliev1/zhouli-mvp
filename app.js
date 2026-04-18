@@ -184,6 +184,11 @@ const CARD_REQUIRED_FIELDS = [
   "markdown",
 ];
 
+const EXPORT_SIZE = {
+  width: 1080,
+  height: 1350,
+};
+
 const IMAGE_SYSTEM_PREFIX =
   "中国古籍质感海报背景，留白充足，中央偏上视觉焦点，柔和纸张纹理，电影级光影，高清，clean composition，no text";
 
@@ -262,12 +267,13 @@ const state = {
 init();
 
 function init() {
+  state.stylePresetId = resolveStylePreset().id;
   renderPresetButtons();
   bindEvents();
   updateCharCount();
   exposeRuntimeApiHelpers();
   const hasApiKey = Boolean(resolveApiKey());
-  setStatus(hasApiKey ? "等待输入（已检测到 API Key）" : "等待输入（未检测到 API Key，将使用 Mock）");
+  setStatus(hasApiKey ? "等待输入（真实管线已启用）" : "等待输入（缺少 API Key，将使用 Mock）");
 }
 
 function bindEvents() {
@@ -335,10 +341,12 @@ async function handleSend() {
   try {
     const result = await generateBundleWithAutoFallback(input);
     const bundle = result.bundle;
+    state.lastInput = input;
     state.lastBundle = bundle;
     state.selectedMode = bundle.true.empty ? "mix" : "true";
     addAiMessage(bundle);
     setStatus(result.statusText, result.isWarn);
+    void prefetchBackgroundAsset(input, state.selectedMode);
   } finally {
     setComposerBusy(false);
   }
@@ -445,11 +453,17 @@ async function generateBundleWithAutoFallback(input) {
 
   try {
     const activeModel = resolveModel();
-    const markdown = await requestOneLinkMarkdown(input, apiKey, activeModel);
-    const bundle = parseBundleFromMarkdown(markdown, input);
+    const llmResult = await requestCardSchemaWithRepair(input, apiKey, activeModel);
+    const bundle = enforceCardSchema(llmResult.bundle, input);
+    bundle.__meta = {
+      copySource: llmResult.repaired ? "llm_repaired" : "llm",
+      model: activeModel,
+    };
     return {
       bundle,
-      statusText: `真实模型生成完成（${activeModel}）。`,
+      statusText: llmResult.repaired
+        ? `真实模型生成完成（${activeModel}，已自动修复格式）。`
+        : `真实模型生成完成（${activeModel}）。`,
       isWarn: false,
     };
   } catch (error) {
@@ -462,7 +476,35 @@ async function generateBundleWithAutoFallback(input) {
   }
 }
 
-async function requestOneLinkMarkdown(input, apiKey, model) {
+async function requestCardSchemaWithRepair(input, apiKey, model) {
+  const firstText = await requestOneLinkCompletion(buildCardJsonMessages(input), apiKey, model, {
+    temperature: 0.55,
+    maxTokens: 1400,
+  });
+
+  const firstJson = parseJsonFromLlmText(firstText);
+  const firstValidation = validateCardPayload(firstJson);
+  if (firstValidation.ok) {
+    return { bundle: firstJson, repaired: false };
+  }
+
+  const repairedText = await requestOneLinkCompletion(
+    buildRepairMessages(firstText, firstValidation.errors),
+    apiKey,
+    model,
+    { temperature: 0.2, maxTokens: 1400 },
+  );
+
+  const repairedJson = parseJsonFromLlmText(repairedText);
+  const repairedValidation = validateCardPayload(repairedJson);
+  if (repairedValidation.ok) {
+    return { bundle: repairedJson, repaired: true };
+  }
+
+  throw new Error(`结构化文案不合规：${repairedValidation.errors.join("；") || "未知问题"}`);
+}
+
+async function requestOneLinkCompletion(messages, apiKey, model, options = {}) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), ONELINK_CONFIG.requestTimeoutMs);
 
@@ -475,10 +517,10 @@ async function requestOneLinkMarkdown(input, apiKey, model) {
       },
       body: JSON.stringify({
         model,
-        messages: buildLlmMessages(input),
+        messages,
         stream: false,
-        temperature: 0.7,
-        max_tokens: 1200,
+        temperature: options.temperature ?? 0.6,
+        max_tokens: options.maxTokens ?? 1200,
       }),
       signal: controller.signal,
     });
@@ -516,17 +558,49 @@ async function requestOneLinkMarkdown(input, apiKey, model) {
   }
 }
 
-function buildLlmMessages(input) {
+function buildCardJsonMessages(input) {
   return [
     {
       role: "system",
-      content: LLM_SYSTEM_PROMPT,
+      content: LLM_JSON_SYSTEM_PROMPT,
     },
     {
       role: "user",
-      content: `请判这句现代处境：${input}`,
+      content: [
+        "请按固定 schema 输出 JSON。",
+        "用户处境：",
+        input,
+      ].join("\n"),
     },
   ];
+}
+
+function buildRepairMessages(rawText, errors) {
+  const errorText = errors.length ? errors.join("；") : "字段缺失或类型错误";
+  return [
+    { role: "system", content: LLM_JSON_REPAIR_PROMPT },
+    {
+      role: "user",
+      content: [
+        "请修复这段输出，使其成为严格 JSON。",
+        `问题：${errorText}`,
+        "目标结构：",
+        JSON.stringify(buildCardSchemaTemplate(), null, 2),
+        "待修复内容：",
+        rawText,
+      ].join("\n"),
+    },
+  ];
+}
+
+function buildCardSchemaTemplate() {
+  return {
+    identityTag: "string",
+    true: { title: "string", desc: "string", source: "string", empty: false },
+    mix: { title: "string", desc: "string" },
+    parody: { title: "string", desc: "string" },
+    markdown: "string",
+  };
 }
 
 function extractAssistantContent(payload) {
@@ -562,6 +636,345 @@ function extractApiErrorMessage(status, payload, rawText) {
   return `HTTP ${status}: ${compact.slice(0, 90)}`;
 }
 
+function parseJsonFromLlmText(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {}
+
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch && fenceMatch[1]) {
+    try {
+      return JSON.parse(fenceMatch[1].trim());
+    } catch {}
+  }
+
+  const objectText = extractFirstJsonObject(text);
+  if (!objectText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(objectText);
+  } catch {
+    return null;
+  }
+}
+
+function extractFirstJsonObject(text) {
+  let depth = 0;
+  let start = -1;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === "{") {
+      if (depth === 0) {
+        start = i;
+      }
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0 && start !== -1) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  return "";
+}
+
+function validateCardPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, errors: ["根节点不是对象"] };
+  }
+
+  const errors = [];
+  CARD_REQUIRED_FIELDS.forEach((path) => {
+    const value = readByPath(payload, path);
+    if (value === undefined || value === null) {
+      errors.push(`缺少字段 ${path}`);
+      return;
+    }
+
+    if (path === "true.empty") {
+      if (typeof value !== "boolean") {
+        errors.push("true.empty 必须是布尔值");
+      }
+      return;
+    }
+
+    if (typeof value !== "string") {
+      errors.push(`${path} 必须是字符串`);
+    }
+  });
+
+  return { ok: errors.length === 0, errors };
+}
+
+function enforceCardSchema(rawPayload, input) {
+  const fallback = buildMockBundle(input);
+  const raw = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+
+  const trueRaw = raw.true && typeof raw.true === "object" ? raw.true : {};
+  const mixRaw = raw.mix && typeof raw.mix === "object" ? raw.mix : {};
+  const parodyRaw = raw.parody && typeof raw.parody === "object" ? raw.parody : {};
+
+  const bundle = {
+    identityTag: clipTextWithEllipsis(safeText(raw.identityTag) || fallback.identityTag, CARD_SCHEMA_LIMITS.identityTag),
+    true: {
+      title: clipTextWithEllipsis(safeText(trueRaw.title) || fallback.true.title, CARD_SCHEMA_LIMITS.trueTitle),
+      desc: clipTextWithEllipsis(safeText(trueRaw.desc) || fallback.true.desc, CARD_SCHEMA_LIMITS.trueDesc),
+      source: clipTextWithEllipsis(safeText(trueRaw.source) || fallback.true.source, CARD_SCHEMA_LIMITS.trueSource),
+      empty: Boolean(trueRaw.empty),
+    },
+    mix: {
+      title: clipTextWithEllipsis(safeText(mixRaw.title) || fallback.mix.title, CARD_SCHEMA_LIMITS.mixTitle),
+      desc: clipTextWithEllipsis(safeText(mixRaw.desc) || fallback.mix.desc, CARD_SCHEMA_LIMITS.mixDesc),
+    },
+    parody: {
+      title: clipTextWithEllipsis(safeText(parodyRaw.title) || fallback.parody.title, CARD_SCHEMA_LIMITS.parodyTitle),
+      desc: clipTextWithEllipsis(safeText(parodyRaw.desc) || fallback.parody.desc, CARD_SCHEMA_LIMITS.parodyDesc),
+    },
+    generatedAt: formatTime(new Date()),
+  };
+
+  if (bundle.true.empty) {
+    bundle.true.source = "";
+  }
+
+  const markdownInput = safeText(raw.markdown);
+  bundle.markdown = clipTextWithEllipsis(markdownInput || buildAssistantMarkdown(bundle), CARD_SCHEMA_LIMITS.markdown);
+
+  if (!hasRequiredCardFields(bundle)) {
+    const mock = buildMockBundle(input);
+    mock.__meta = { copySource: "mock_schema_guard" };
+    return mock;
+  }
+
+  return bundle;
+}
+
+function clipTextWithEllipsis(text, maxLen) {
+  const value = safeText(text);
+  if (!value || value.length <= maxLen) {
+    return value;
+  }
+  if (maxLen <= 1) {
+    return "…";
+  }
+  return `${value.slice(0, maxLen - 1)}…`;
+}
+
+function hasRequiredCardFields(bundle) {
+  if (!bundle || typeof bundle !== "object") {
+    return false;
+  }
+
+  const allowEmptyStringPaths = new Set(["true.source"]);
+  return CARD_REQUIRED_FIELDS.every((path) => {
+    const value = readByPath(bundle, path);
+    if (value === undefined || value === null) {
+      return false;
+    }
+    if (path === "true.empty") {
+      return typeof value === "boolean";
+    }
+    if (typeof value !== "string") {
+      return false;
+    }
+    if (allowEmptyStringPaths.has(path)) {
+      return true;
+    }
+    return value.trim().length > 0;
+  });
+}
+
+function readByPath(obj, path) {
+  return path.split(".").reduce((acc, key) => {
+    if (!acc || typeof acc !== "object") {
+      return undefined;
+    }
+    return acc[key];
+  }, obj);
+}
+
+async function prefetchBackgroundAsset(input, mode) {
+  const apiKey = resolveApiKey();
+  if (!apiKey || !resolveImageEnabled()) {
+    return;
+  }
+  try {
+    await getBackgroundAsset(input, mode, apiKey);
+  } catch {}
+}
+
+async function getBackgroundAsset(input, mode, apiKey) {
+  const preset = resolveStylePreset();
+  const normalized = normalizeInputForSeed(input);
+  const seed = hashStringToSeed(`${preset.id}|${mode}|${normalized}`);
+  const cacheKey = `${preset.id}|${mode}|${seed}`;
+
+  if (state.backgroundCache.has(cacheKey)) {
+    return state.backgroundCache.get(cacheKey);
+  }
+
+  const pending = requestBackgroundImageDataUrl({
+    apiKey,
+    mode,
+    input,
+    preset,
+    seed,
+  }).catch((error) => {
+    state.backgroundCache.delete(cacheKey);
+    throw error;
+  });
+
+  state.backgroundCache.set(cacheKey, pending);
+  return pending;
+}
+
+async function requestBackgroundImageDataUrl({ apiKey, mode, input, preset, seed }) {
+  const prompt = buildBackgroundPrompt(mode, input, preset);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), ONELINK_CONFIG.requestTimeoutMs);
+
+  try {
+    const response = await fetch(`${ONELINK_CONFIG.baseUrl}${ONELINK_CONFIG.imageEndpoint}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: ONELINK_CONFIG.imageModel,
+        prompt,
+        size: ONELINK_CONFIG.imageSize,
+        steps: ONELINK_CONFIG.imageSteps,
+        cfg: ONELINK_CONFIG.imageCfg,
+        seed,
+        negative_prompt: IMAGE_NEGATIVE_PROMPT,
+      }),
+      signal: controller.signal,
+    });
+
+    const rawText = await response.text();
+    let payload = {};
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = {};
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error(extractApiErrorMessage(response.status, payload, rawText));
+    }
+
+    const imageData = payload?.data?.[0] || {};
+    if (typeof imageData.b64_json === "string" && imageData.b64_json.trim()) {
+      return {
+        dataUrl: `data:image/png;base64,${imageData.b64_json}`,
+        source: "llm_image_b64",
+      };
+    }
+
+    if (typeof imageData.url === "string" && imageData.url.trim()) {
+      const blobResponse = await fetch(imageData.url.trim());
+      if (!blobResponse.ok) {
+        throw new Error("背景图 URL 不可读取");
+      }
+      const blob = await blobResponse.blob();
+      const dataUrl = await blobToDataUrl(blob);
+      return { dataUrl, source: "llm_image_url" };
+    }
+
+    throw new Error("图像模型未返回可用图片");
+  } catch (error) {
+    if (error && typeof error === "object" && error.name === "AbortError") {
+      throw new Error("背景图请求超时");
+    }
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error("背景图请求失败");
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+function buildBackgroundPrompt(mode, input, preset) {
+  const mood = deriveMoodKeywords(input);
+  const modeLabel = MODE_META[mode]?.label || "意译";
+  const tone = preset?.palette?.bgTop && preset?.palette?.bgBottom ? "青黛暖金" : "宣纸浅墨";
+  return [
+    IMAGE_SYSTEM_PREFIX,
+    `mode: ${modeLabel}`,
+    `色调: ${tone}`,
+    `情绪关键词: ${mood.join("、")}`,
+  ].join("；");
+}
+
+function deriveMoodKeywords(input) {
+  const themes = detectThemes(input);
+  const map = {
+    roommate: ["边界", "克制"],
+    teamwork: ["秩序", "协作"],
+    fairness: ["公正", "分寸"],
+    promise: ["守信", "决断"],
+    deadline: ["紧迫", "执行"],
+    morning: ["清醒", "行动"],
+    workplace: ["专业", "稳健"],
+    study: ["专注", "沉浸"],
+    social: ["体面", "回应"],
+    general: ["冷静", "留白"],
+  };
+
+  const mood = [];
+  themes.forEach((theme) => {
+    const words = map[theme] || [];
+    words.forEach((word) => {
+      if (!mood.includes(word)) {
+        mood.push(word);
+      }
+    });
+  });
+
+  return mood.slice(0, 3).length ? mood.slice(0, 3) : map.general;
+}
+
+function normalizeInputForSeed(input) {
+  return String(input || "")
+    .toLowerCase()
+    .replace(/[\s\r\n\t]+/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .slice(0, 120);
+}
+
+function hashStringToSeed(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  const positive = Math.abs(hash >>> 0);
+  return (positive % 2147483646) + 1;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
 function resolveApiKey() {
   const byStorage = pickStorageValue(ONELINK_CONFIG.keyStorageNames);
   if (byStorage) {
@@ -576,6 +989,69 @@ function resolveModel() {
     pickStorageValue(ONELINK_CONFIG.modelStorageNames) ||
     ONELINK_CONFIG.fallbackModel
   );
+}
+
+function resolveStylePreset() {
+  const presets = window.STYLE_PRESETS || {};
+  const all = Object.values(presets);
+  const fallback = all[0];
+  if (!fallback) {
+    return {
+      id: "default",
+      palette: {
+        bgTop: "#1f3f3a",
+        bgBottom: "#2b5a52",
+        textPrimary: "#fff4e8",
+        textSecondary: "#f4e1cc",
+        accent: "#ffe5c6",
+        accentSoft: "rgba(255,229,198,0.18)",
+        border: "rgba(248,228,206,0.3)",
+      },
+      modeColor: { true: "#ffd9ab", mix: "#ffecc8", parody: "#ffcc95" },
+      fonts: {
+        brand: '"Noto Sans SC", sans-serif',
+        title: '"Noto Sans SC", sans-serif',
+        body: '"Noto Sans SC", sans-serif',
+        tag: '"Noto Sans SC", sans-serif',
+      },
+      paddings: { x: 96, top: 160, contentTop: 380, bottom: 120 },
+      textureStrength: 0.14,
+      avatarStyle: { shape: "circle", stroke: "rgba(255,235,208,0.45)", strokeWidth: 2 },
+      layout: {
+        canvasWidth: 1080,
+        canvasHeight: 1350,
+        titleStart: 56,
+        titleMin: 40,
+        titleLineHeight: 1.22,
+        titleMaxLines: 4,
+        bodyStart: 36,
+        bodyMin: 28,
+        bodyLineHeight: 1.35,
+        bodyMaxLines: 8,
+      },
+    };
+  }
+
+  const saved = pickStorageValue([ONELINK_CONFIG.styleStorageName]);
+  if (saved && presets[saved]) {
+    return presets[saved];
+  }
+  if (state.stylePresetId && presets[state.stylePresetId]) {
+    return presets[state.stylePresetId];
+  }
+  return fallback;
+}
+
+function resolveImageEnabled() {
+  const fromWindow = window.__CARD_IMAGE_ENABLED__;
+  if (typeof fromWindow === "boolean") {
+    return fromWindow;
+  }
+  const fromStorage = pickStorageValue([ONELINK_CONFIG.imageEnabledStorageName]);
+  if (!fromStorage) {
+    return true;
+  }
+  return fromStorage !== "0" && fromStorage !== "false";
 }
 
 function pickWindowValue(nameList) {
@@ -624,153 +1100,29 @@ function exposeRuntimeApiHelpers() {
       return false;
     }
   };
-}
-
-function parseBundleFromMarkdown(markdown, input) {
-  const normalizedText = String(markdown || "").replace(/\r\n/g, "\n").trim();
-  const themes = detectThemes(input);
-  const identityTag = extractIdentityTag(normalizedText) || buildIdentityTag(themes, input);
-
-  const trueSection = extractSectionByHeading(normalizedText, "真引");
-  const mixSection = extractSectionByHeading(normalizedText, "意译");
-  const parodySection = extractSectionByHeading(normalizedText, "戏仿");
-
-  const parsed = {
-    identityTag,
-    true: parseModeSection(trueSection, { strictTrue: true }),
-    mix: parseModeSection(mixSection),
-    parody: parseModeSection(parodySection),
-    rawMarkdown: normalizedText,
-  };
-
-  return normalizeBundle(parsed, input);
-}
-
-function extractIdentityTag(markdown) {
-  const match = markdown.match(/(?:^|\n)#\s*身份标签\s*\n([\s\S]*?)(?=\n#{1,6}\s|$)/i);
-  if (!match) {
-    return "";
-  }
-
-  const lines = match[1]
-    .split("\n")
-    .map((line) => stripMarkdownPrefix(line))
-    .filter(Boolean);
-
-  return lines[0] || "";
-}
-
-function extractSectionByHeading(markdown, heading) {
-  const pattern = new RegExp(
-    `(?:^|\\n)##\\s*${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n##\\s*|$)`,
-    "i",
-  );
-  const match = markdown.match(pattern);
-  return match ? match[1].trim() : "";
-}
-
-function parseModeSection(sectionText, options = {}) {
-  const { strictTrue = false } = options;
-  const lines = String(sectionText || "")
-    .split("\n")
-    .map((line) => stripMarkdownPrefix(line))
-    .filter(Boolean);
-
-  let title = "";
-  let source = "";
-  const descParts = [];
-  const freeLines = [];
-
-  lines.forEach((line) => {
-    const titleMatch = line.match(/^(判词|标题|quote|句子)\s*[：:]\s*(.+)$/i);
-    if (titleMatch) {
-      title = titleMatch[2].trim();
-      return;
+  window.setCardStylePreset = (presetId) => {
+    const presets = window.STYLE_PRESETS || {};
+    if (!presets[presetId]) {
+      return false;
     }
-
-    const descMatch = line.match(/^(解释|说明|解读|comment)\s*[：:]\s*(.+)$/i);
-    if (descMatch) {
-      descParts.push(descMatch[2].trim());
-      return;
+    state.stylePresetId = presetId;
+    try {
+      window.localStorage.setItem(ONELINK_CONFIG.styleStorageName, presetId);
+      return true;
+    } catch {
+      return false;
     }
+  };
 
-    const sourceMatch = line.match(/^(出处|source)\s*[：:]\s*(.+)$/i);
-    if (sourceMatch) {
-      source = sourceMatch[2].trim();
-      return;
+  window.setCardImageEnabled = (enabled) => {
+    const value = Boolean(enabled);
+    try {
+      window.localStorage.setItem(ONELINK_CONFIG.imageEnabledStorageName, value ? "true" : "false");
+      return true;
+    } catch {
+      return false;
     }
-
-    freeLines.push(line);
-  });
-
-  if (!title && freeLines.length > 0) {
-    title = freeLines.shift();
-  }
-  if (descParts.length === 0 && freeLines.length > 0) {
-    descParts.push(freeLines.join(" "));
-  }
-
-  const desc = descParts.join(" ").replace(/\s+/g, " ").trim();
-  const textForCheck = `${title} ${desc} ${source}`;
-  const missingTrueQuote = /暂缺|留空|未检索|无可信|（无）/i.test(textForCheck);
-
-  return {
-    title,
-    desc,
-    source,
-    empty: strictTrue ? missingTrueQuote || !title : false,
   };
-}
-
-function normalizeBundle(parsed, input) {
-  const fallback = buildMockBundle(input);
-
-  const normalizedTrue = normalizeModeResult(parsed.true, fallback.true, true);
-  const normalizedMix = normalizeModeResult(parsed.mix, fallback.mix, false);
-  const normalizedParody = normalizeModeResult(parsed.parody, fallback.parody, false);
-
-  const normalized = {
-    identityTag: safeText(parsed.identityTag) || fallback.identityTag,
-    true: normalizedTrue,
-    mix: normalizedMix,
-    parody: normalizedParody,
-    generatedAt: formatTime(new Date()),
-    rawMarkdown: parsed.rawMarkdown || "",
-  };
-  normalized.markdown = normalized.rawMarkdown || buildAssistantMarkdown(normalized);
-  return normalized;
-}
-
-function normalizeModeResult(modeResult, fallbackMode, strictTrue) {
-  if (strictTrue && modeResult?.empty) {
-    return {
-      title: safeText(modeResult.title) || "暂未检索到可信古籍原句",
-      desc: safeText(modeResult.desc) || "真引模式留空，避免伪造出处。你可以换一种表达再试。",
-      source: "",
-      empty: true,
-    };
-  }
-
-  const title = safeText(modeResult?.title) || fallbackMode.title;
-  const desc = safeText(modeResult?.desc) || fallbackMode.desc;
-  const source = safeText(modeResult?.source) || fallbackMode.source;
-
-  return {
-    title,
-    desc,
-    source,
-    empty: strictTrue ? false : false,
-  };
-}
-
-function stripMarkdownPrefix(line) {
-  return String(line || "")
-    .replace(/^\s*[-*+]\s+/, "")
-    .replace(/^\s*\d+\.\s+/, "")
-    .replace(/^\s*>\s?/, "")
-    .replace(/\*\*/g, "")
-    .replace(/`/g, "")
-    .trim();
 }
 
 function safeText(value) {
@@ -787,10 +1139,6 @@ function simplifyErrorMessage(error) {
     return fallback;
   }
   return String(msg).replace(/\s+/g, " ").trim().slice(0, 50);
-}
-
-function escapeRegExp(input) {
-  return String(input).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function generateBundle(input) {
@@ -961,19 +1309,19 @@ async function copyToClipboard(text) {
   }
 }
 
-function exportCardAsPng() {
+async function exportCardAsPng() {
   const bundle = state.lastBundle;
   if (!bundle) {
     return;
   }
 
-  const mode = state.selectedMode;
+  const preset = resolveStylePreset();
+  const mode = MODE_META[state.selectedMode] ? state.selectedMode : "mix";
   const modeLabel = MODE_META[mode].label;
-  const result = bundle[mode];
 
   const canvas = document.createElement("canvas");
-  canvas.width = 1080;
-  canvas.height = 1350;
+  canvas.width = EXPORT_SIZE.width;
+  canvas.height = EXPORT_SIZE.height;
   const ctx = canvas.getContext("2d");
 
   if (!ctx) {
@@ -981,99 +1329,247 @@ function exportCardAsPng() {
     return;
   }
 
-  const gradient = ctx.createLinearGradient(0, 0, 1080, 1350);
-  gradient.addColorStop(0, "#1f3f3a");
-  gradient.addColorStop(1, "#2b5a52");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, 1080, 1350);
+  let backgroundImage = null;
+  let backgroundSource = "template";
 
-  drawGlowCircle(ctx, 920, 160, 260, "rgba(255,245,230,0.18)");
-  drawGlowCircle(ctx, 140, 1120, 230, "rgba(181,72,47,0.2)");
-
-  ctx.strokeStyle = "rgba(248,228,206,0.3)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(62, 62, 956, 1226);
-
-  ctx.fillStyle = "#ffe5c6";
-  ctx.font = '74px "Noto Sans SC", sans-serif';
-  ctx.fillText("合乎周礼", 96, 160);
-
-  ctx.fillStyle = "#f9dfc4";
-  ctx.font = '35px "Noto Sans SC", sans-serif';
-  ctx.fillText("这合乎周礼吗？", 96, 215);
-
-  ctx.font = '28px "Noto Sans SC", sans-serif';
-  const tagWidth = ctx.measureText(bundle.identityTag).width + 52;
-  roundRect(ctx, 96, 248, tagWidth, 54, 27, "rgba(255,229,198,0.16)", "rgba(255,229,198,0.45)");
-  ctx.fillStyle = "#ffe8cd";
-  ctx.fillText(bundle.identityTag, 120, 283);
-
-  const mainY = drawWrappedText(
-    ctx,
-    result.title,
-    96,
-    380,
-    888,
-    64,
-    7,
-    '700 52px "Noto Sans SC", sans-serif',
-    "#fff4e8",
-  );
-
-  let desc = result.desc;
-  if (result.source) {
-    desc += `\n${result.source}`;
+  if (resolveImageEnabled() && state.lastInput && resolveApiKey()) {
+    try {
+      const asset = await getBackgroundAsset(state.lastInput, mode, resolveApiKey());
+      backgroundImage = await loadImageFromDataUrl(asset.dataUrl);
+      backgroundSource = asset.source || "llm_image";
+    } catch (error) {
+      console.warn("[card] background fallback", error);
+    }
   }
 
-  drawWrappedText(
-    ctx,
-    desc,
-    96,
-    mainY + 26,
-    888,
-    46,
-    8,
-    '500 34px "Noto Sans SC", sans-serif',
-    "#f4e1cc",
-  );
+  let renderResult = renderCardComposition(ctx, {
+    bundle,
+    mode,
+    modeLabel,
+    preset,
+    backgroundImage,
+    useTemplateBackground: false,
+    backgroundSource,
+  });
 
-  ctx.beginPath();
-  ctx.moveTo(96, 1210);
-  ctx.lineTo(984, 1210);
-  ctx.strokeStyle = "rgba(255,225,190,0.35)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  let quality = runCardQualityChecks({
+    bundle,
+    canvas,
+    layout: renderResult.layout,
+    preset,
+  });
 
-  ctx.fillStyle = "#f9ddbe";
-  ctx.font = '500 30px "Noto Sans SC", sans-serif';
-  ctx.fillText(`模式：${modeLabel}`, 96, 1270);
-  ctx.fillText(bundle.generatedAt, 470, 1270);
-  ctx.fillText("HZL · v1", 850, 1270);
+  if (!quality.passed) {
+    renderResult = renderCardComposition(ctx, {
+      bundle,
+      mode,
+      modeLabel,
+      preset,
+      backgroundImage: null,
+      useTemplateBackground: true,
+      backgroundSource: "stable_template",
+    });
+    quality = runCardQualityChecks({
+      bundle,
+      canvas,
+      layout: renderResult.layout,
+      preset,
+    });
+    setStatus("检测到导出风险，已启用稳定模板。", true);
+  }
+
+  let dataUrl = "";
+  try {
+    dataUrl = canvas.toDataURL("image/png");
+  } catch {
+    renderResult = renderCardComposition(ctx, {
+      bundle,
+      mode,
+      modeLabel,
+      preset,
+      backgroundImage: null,
+      useTemplateBackground: true,
+      backgroundSource: "stable_template",
+    });
+    dataUrl = canvas.toDataURL("image/png");
+    setStatus("跨域背景不可导出，已启用稳定模板。", true);
+  }
 
   const link = document.createElement("a");
-  link.href = canvas.toDataURL("image/png");
+  link.href = dataUrl;
   link.download = `hehu-zhouli-${Date.now()}.png`;
   link.click();
 
   showToast("图卡已导出");
 }
 
-function drawGlowCircle(ctx, x, y, radius, color) {
-  const radial = ctx.createRadialGradient(x, y, 0, x, y, radius);
-  radial.addColorStop(0, color);
-  radial.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.fillStyle = radial;
-  ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+function renderCardComposition(
+  ctx,
+  {
+    bundle,
+    mode,
+    modeLabel,
+    preset,
+    backgroundImage,
+    useTemplateBackground = false,
+    backgroundSource = "template",
+  },
+) {
+  const palette = preset.palette || {};
+  const fonts = preset.fonts || {};
+  const paddings = preset.paddings || {};
+  const layoutPreset = preset.layout || {};
+
+  const width = EXPORT_SIZE.width;
+  const height = EXPORT_SIZE.height;
+  const x = paddings.x || 96;
+  const top = paddings.top || 160;
+  const contentTop = paddings.contentTop || 380;
+  const contentWidth = width - x * 2;
+
+  if (!useTemplateBackground && backgroundImage) {
+    drawImageCover(ctx, backgroundImage, width, height);
+    const overlay = ctx.createLinearGradient(0, 0, 0, height);
+    overlay.addColorStop(0, "rgba(8,16,14,0.38)");
+    overlay.addColorStop(1, "rgba(8,16,14,0.58)");
+    ctx.fillStyle = overlay;
+    ctx.fillRect(0, 0, width, height);
+  } else {
+    drawStableTemplateBackground(ctx, preset);
+  }
+
+  drawTexture(ctx, width, height, preset.textureStrength || 0.12);
+
+  ctx.strokeStyle = palette.border || "rgba(248,228,206,0.3)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(62, 62, 956, 1226);
+
+  ctx.fillStyle = palette.accent || "#ffe5c6";
+  ctx.font = `700 74px ${fonts.brand || '"Noto Sans SC", sans-serif'}`;
+  ctx.fillText("合乎周礼", x, top);
+
+  ctx.fillStyle = palette.textSecondary || "#f9dfc4";
+  ctx.font = `500 35px ${fonts.body || '"Noto Sans SC", sans-serif'}`;
+  ctx.fillText("这合乎周礼吗？", x, top + 55);
+
+  ctx.font = `500 28px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
+  const tagText = clipTextWithEllipsis(bundle.identityTag, CARD_SCHEMA_LIMITS.identityTag);
+  const tagWidth = ctx.measureText(tagText).width + 52;
+  roundRect(
+    ctx,
+    x,
+    top + 88,
+    tagWidth,
+    54,
+    27,
+    palette.accentSoft || "rgba(255,229,198,0.16)",
+    "rgba(255,229,198,0.45)",
+  );
+  ctx.fillStyle = palette.accent || "#ffe8cd";
+  ctx.fillText(tagText, x + 24, top + 123);
+
+  const cardMode = bundle[mode] || bundle.mix || buildMockBundle("默认").mix;
+  const titleFit = fitTextBlock(ctx, cardMode.title, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.titleMaxLines || 4,
+    startSize: layoutPreset.titleStart || 56,
+    minSize: layoutPreset.titleMin || 40,
+    lineHeightRatio: layoutPreset.titleLineHeight || 1.22,
+    fontFamily: fonts.title || '"Noto Sans SC", sans-serif',
+    fontWeight: 700,
+  });
+
+  const titleColorMap = preset.modeColor || palette.modeColor || {};
+  ctx.fillStyle = titleColorMap[mode] || palette.textPrimary || "#fff4e8";
+  drawLines(ctx, titleFit.lines, x, contentTop, titleFit.lineHeight);
+
+  const descText = cardMode.source ? `${cardMode.desc}\n${cardMode.source}` : cardMode.desc;
+  const descFit = fitTextBlock(ctx, descText, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.bodyMaxLines || 8,
+    startSize: layoutPreset.bodyStart || 36,
+    minSize: layoutPreset.bodyMin || 28,
+    lineHeightRatio: layoutPreset.bodyLineHeight || 1.35,
+    fontFamily: fonts.body || '"Noto Sans SC", sans-serif',
+    fontWeight: 500,
+  });
+
+  ctx.fillStyle = palette.textSecondary || "#f4e1cc";
+  drawLines(ctx, descFit.lines, x, contentTop + titleFit.height + 28, descFit.lineHeight);
+
+  ctx.beginPath();
+  ctx.moveTo(x, 1210);
+  ctx.lineTo(width - x, 1210);
+  ctx.strokeStyle = "rgba(255,225,190,0.35)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = palette.textSecondary || "#f9ddbe";
+  ctx.font = `500 30px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
+  ctx.fillText(`模式：${modeLabel}`, x, 1270);
+  ctx.fillText(bundle.generatedAt, 470, 1270);
+  ctx.fillText("HZL · v1", 850, 1270);
+
+  return {
+    layout: {
+      titleFontSize: titleFit.fontSize,
+      bodyFontSize: descFit.fontSize,
+      hasOverflow: titleFit.overflow || descFit.overflow,
+      backgroundSource,
+      mode,
+    },
+  };
 }
 
-function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines, font, color) {
-  ctx.font = font;
-  ctx.fillStyle = color;
+function fitTextBlock(
+  ctx,
+  text,
+  { maxWidth, maxLines, startSize, minSize, lineHeightRatio, fontFamily, fontWeight },
+) {
+  const normalized = String(text || "").replace(/\r\n/g, "\n").trim();
+  let fontSize = startSize;
+  let best = null;
 
+  while (fontSize >= minSize) {
+    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    const lines = measureWrappedLines(ctx, normalized, maxWidth);
+    if (lines.length <= maxLines) {
+      best = {
+        lines,
+        fontSize,
+        lineHeight: Math.round(fontSize * lineHeightRatio),
+        overflow: false,
+      };
+      break;
+    }
+    fontSize -= 2;
+  }
+
+  if (!best) {
+    fontSize = minSize;
+    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    const lines = measureWrappedLines(ctx, normalized, maxWidth).slice(0, maxLines);
+    if (lines.length) {
+      lines[lines.length - 1] = truncateLineWithEllipsis(ctx, lines[lines.length - 1], maxWidth);
+    }
+    best = {
+      lines,
+      fontSize,
+      lineHeight: Math.round(fontSize * lineHeightRatio),
+      overflow: true,
+    };
+  }
+
+  best.height = best.lines.length * best.lineHeight;
+  ctx.font = `${fontWeight} ${best.fontSize}px ${fontFamily}`;
+  return best;
+}
+
+function measureWrappedLines(ctx, text, maxWidth) {
   const lines = [];
-  const paragraphs = text.split("\n");
+  const paragraphs = String(text || "").split("\n");
 
-  paragraphs.forEach((paragraph, paragraphIndex) => {
+  paragraphs.forEach((paragraph, index) => {
     let line = "";
     for (const char of paragraph) {
       const next = line + char;
@@ -1087,18 +1583,134 @@ function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines, font, 
     if (line) {
       lines.push(line);
     }
-    if (paragraphIndex !== paragraphs.length - 1) {
+    if (index !== paragraphs.length - 1) {
       lines.push("");
     }
   });
 
-  const safeLines = lines.slice(0, maxLines);
-  safeLines.forEach((line, index) => {
-    const output = index === maxLines - 1 && lines.length > maxLines ? `${line.slice(0, Math.max(0, line.length - 2))}…` : line;
-    ctx.fillText(output, x, y + index * lineHeight);
-  });
+  return lines.length ? lines : [""];
+}
 
-  return y + safeLines.length * lineHeight;
+function truncateLineWithEllipsis(ctx, line, maxWidth) {
+  let current = line;
+  while (current.length > 1 && ctx.measureText(`${current}…`).width > maxWidth) {
+    current = current.slice(0, -1);
+  }
+  return `${current}…`;
+}
+
+function drawLines(ctx, lines, x, startY, lineHeight) {
+  lines.forEach((line, index) => {
+    ctx.fillText(line, x, startY + index * lineHeight);
+  });
+}
+
+function drawImageCover(ctx, image, width, height) {
+  const scale = Math.max(width / image.width, height / image.height);
+  const drawWidth = image.width * scale;
+  const drawHeight = image.height * scale;
+  const offsetX = (width - drawWidth) / 2;
+  const offsetY = (height - drawHeight) / 2;
+  ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+}
+
+function drawStableTemplateBackground(ctx, preset) {
+  const palette = preset.palette || {};
+  const gradient = ctx.createLinearGradient(0, 0, EXPORT_SIZE.width, EXPORT_SIZE.height);
+  gradient.addColorStop(0, palette.bgTop || "#1f3f3a");
+  gradient.addColorStop(1, palette.bgBottom || "#2b5a52");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, EXPORT_SIZE.width, EXPORT_SIZE.height);
+
+  drawGlowCircle(ctx, 920, 160, 260, "rgba(255,245,230,0.18)");
+  drawGlowCircle(ctx, 140, 1120, 230, "rgba(181,72,47,0.2)");
+}
+
+function drawTexture(ctx, width, height, strength) {
+  const alpha = Math.max(0, Math.min(0.25, strength * 0.35));
+  ctx.save();
+  for (let i = 0; i < 180; i += 1) {
+    const x = Math.random() * width;
+    const y = Math.random() * height;
+    const radius = Math.random() * 1.2 + 0.2;
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function runCardQualityChecks({ bundle, canvas, layout, preset }) {
+  const checks = {
+    noOverflow: !layout.hasOverflow,
+    bodyFontMin: layout.bodyFontSize >= 28,
+    contrast: calculateContrastRatio(
+      preset.palette?.textPrimary || "#fff4e8",
+      preset.palette?.bgTop || "#1f3f3a",
+    ) >= 4.5,
+    requiredFields: hasRequiredCardFields(bundle),
+    fixedSize: canvas.width === EXPORT_SIZE.width && canvas.height === EXPORT_SIZE.height,
+  };
+  const passed = Object.values(checks).every(Boolean);
+  return { passed, checks };
+}
+
+function calculateContrastRatio(hexA, hexB) {
+  const lumA = getRelativeLuminance(hexA);
+  const lumB = getRelativeLuminance(hexB);
+  const lighter = Math.max(lumA, lumB);
+  const darker = Math.min(lumA, lumB);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function getRelativeLuminance(color) {
+  const { r, g, b } = parseColorToRgb(color);
+  const toLinear = (channel) => {
+    const c = channel / 255;
+    if (c <= 0.03928) {
+      return c / 12.92;
+    }
+    return ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
+}
+
+function parseColorToRgb(color) {
+  const value = String(color || "").trim();
+  const hex = value.startsWith("#") ? value.slice(1) : value;
+  if (hex.length === 3) {
+    return {
+      r: parseInt(hex[0] + hex[0], 16),
+      g: parseInt(hex[1] + hex[1], 16),
+      b: parseInt(hex[2] + hex[2], 16),
+    };
+  }
+  if (hex.length >= 6) {
+    return {
+      r: parseInt(hex.slice(0, 2), 16),
+      g: parseInt(hex.slice(2, 4), 16),
+      b: parseInt(hex.slice(4, 6), 16),
+    };
+  }
+  return { r: 255, g: 255, b: 255 };
+}
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("背景图加载失败"));
+    image.src = dataUrl;
+  });
+}
+
+function drawGlowCircle(ctx, x, y, radius, color) {
+  const radial = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  radial.addColorStop(0, color);
+  radial.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = radial;
+  ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
 }
 
 function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
@@ -1259,6 +1871,9 @@ function formatTime(date) {
 }
 
 function setStatus(text, isWarn = false) {
+  if (!elements.statusText) {
+    return;
+  }
   elements.statusText.textContent = text;
   elements.statusText.style.color = isWarn ? "var(--warn)" : "var(--muted)";
 }
