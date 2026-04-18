@@ -196,7 +196,10 @@ const IMAGE_NEGATIVE_PROMPT =
   "text, words, letters, watermark, logo, signature, deformed face, low quality, blurry, noisy, jpeg artifacts";
 
 const LLM_JSON_SYSTEM_PROMPT = [
-  "你是“合乎周礼”的文案引擎。",
+  "你是“合乎周礼”的古人判词官，面向社交平台用户产出可传播文案。",
+  "前提条件：只要存在可核验的真实古文原句，就优先使用原句并给出真实出处。",
+  "知识边界：优先基于周礼相关古代文献进行判断、引用与改写。",
+  "表达风格：一本正经地引经据典，带轻度戏谑和机锋，读起来像古人开麦点评现代破事。",
   "输出严格 JSON，不要输出 Markdown，不要输出代码块，不要输出额外解释。",
   "JSON 结构必须是：",
   "{",
@@ -207,6 +210,7 @@ const LLM_JSON_SYSTEM_PROMPT = [
   '  "markdown": "string"',
   "}",
   "要求：",
+  "identityTag 要短、怪、能自称，像社交标签。",
   `identityTag 长度 <= ${CARD_SCHEMA_LIMITS.identityTag}。`,
   `true.title 长度 <= ${CARD_SCHEMA_LIMITS.trueTitle}。`,
   `true.desc 长度 <= ${CARD_SCHEMA_LIMITS.trueDesc}。`,
@@ -216,8 +220,11 @@ const LLM_JSON_SYSTEM_PROMPT = [
   `parody.title 长度 <= ${CARD_SCHEMA_LIMITS.parodyTitle}。`,
   `parody.desc 长度 <= ${CARD_SCHEMA_LIMITS.parodyDesc}。`,
   `markdown 长度 <= ${CARD_SCHEMA_LIMITS.markdown}，并与字段内容一致。`,
+  "真引模式必须引用真实古籍原句与出处；若无法确认真实出处，必须写 true.empty=true，true.title=“暂缺可信原句”，true.source=“”。",
+  "意译模式强调古今混搭，句子短，适合当评论区回复。",
+  "戏仿模式允许夸张和整活，但不做人身攻击，不写脏话。",
   "禁止缺字段，禁止把 true.empty 写成字符串。",
-  "风格：适合小红书封面传播，简短有力，口语化，边界清晰。",
+  "整体风格：适合小红书/B站传播，短促、有梗、可截图。",
 ].join("\n");
 
 const LLM_JSON_REPAIR_PROMPT = [
@@ -240,6 +247,7 @@ const TAG_BY_THEME = {
 };
 
 const TAG_SUFFIX = ["者", "客", "臣", "民", "司", "侯", "令"];
+const SKILL_REPO_URL = "https://github.com/justtobeliev1/zhouli-mvp.git";
 
 const elements = {
   chatViewport: document.getElementById("chatViewport"),
@@ -251,6 +259,7 @@ const elements = {
   charCount: document.getElementById("charCount"),
   statusText: document.getElementById("statusText"),
   downloadCardBtn: document.getElementById("downloadCardBtn"),
+  copySkillPromptBtn: document.getElementById("copySkillPromptBtn"),
 };
 
 const state = {
@@ -295,6 +304,11 @@ function bindEvents() {
     }
 
     exportCardAsPng();
+  });
+
+  elements.copySkillPromptBtn?.addEventListener("click", async () => {
+    const prompt = buildSkillInstallPrompt();
+    await copyToClipboard(prompt);
   });
 }
 
@@ -346,7 +360,6 @@ async function handleSend() {
     state.selectedMode = bundle.true.empty ? "mix" : "true";
     addAiMessage(bundle);
     setStatus(result.statusText, result.isWarn);
-    void prefetchBackgroundAsset(input, state.selectedMode);
   } finally {
     setComposerBusy(false);
   }
@@ -567,7 +580,8 @@ function buildCardJsonMessages(input) {
     {
       role: "user",
       content: [
-        "请按固定 schema 输出 JSON。",
+        "请按固定 schema 输出 JSON，三种模式都要给出。",
+        "语气要像古人判词，兼顾传播感和梗感。",
         "用户处境：",
         input,
       ].join("\n"),
@@ -1043,15 +1057,7 @@ function resolveStylePreset() {
 }
 
 function resolveImageEnabled() {
-  const fromWindow = window.__CARD_IMAGE_ENABLED__;
-  if (typeof fromWindow === "boolean") {
-    return fromWindow;
-  }
-  const fromStorage = pickStorageValue([ONELINK_CONFIG.imageEnabledStorageName]);
-  if (!fromStorage) {
-    return true;
-  }
-  return fromStorage !== "0" && fromStorage !== "false";
+  return false;
 }
 
 function pickWindowValue(nameList) {
@@ -1115,13 +1121,8 @@ function exposeRuntimeApiHelpers() {
   };
 
   window.setCardImageEnabled = (enabled) => {
-    const value = Boolean(enabled);
-    try {
-      window.localStorage.setItem(ONELINK_CONFIG.imageEnabledStorageName, value ? "true" : "false");
-      return true;
-    } catch {
-      return false;
-    }
+    void enabled;
+    return false;
   };
 }
 
@@ -1281,6 +1282,31 @@ function buildAssistantMarkdown(bundle) {
   ].join("\n");
 }
 
+function buildSkillInstallPrompt() {
+  const apiKey = resolveApiKey() || "<YOUR_ONELINK_API_KEY>";
+  return [
+    "请完成以下任务：",
+    "1) 克隆项目并安装 skill 到本地 agent。",
+    "2) 使用该 skill 生成“合乎周礼”风格判词和可分享卡片。",
+    "",
+    "执行命令：",
+    `git clone ${SKILL_REPO_URL}`,
+    "cd zhouli-mvp",
+    "mkdir -p ~/.codex/skills/zhouli-card",
+    "cp -R skills/zhouli-card/* ~/.codex/skills/zhouli-card/",
+    "",
+    "运行时配置：",
+    `API Key: ${apiKey}`,
+    "Model: claude-opus-4-6",
+    "",
+    "执行要求：",
+    "- 文案必须基于周礼相关古代文献优先引用真实原句。",
+    "- 若无法确认真实出处，真引字段按降级规则返回，不可编造出处。",
+    "- 图卡使用代码渲染模板导出（Canvas），确保稳定可复现。",
+    "- 返回一个示例输入与导出图卡路径。",
+  ].join("\n");
+}
+
 function summarizeInput(input) {
   const plain = input.replace(/[\n\r]+/g, " ").trim();
   if (plain.length <= 18) {
@@ -1329,27 +1355,14 @@ async function exportCardAsPng() {
     return;
   }
 
-  let backgroundImage = null;
-  let backgroundSource = "template";
-
-  if (resolveImageEnabled() && state.lastInput && resolveApiKey()) {
-    try {
-      const asset = await getBackgroundAsset(state.lastInput, mode, resolveApiKey());
-      backgroundImage = await loadImageFromDataUrl(asset.dataUrl);
-      backgroundSource = asset.source || "llm_image";
-    } catch (error) {
-      console.warn("[card] background fallback", error);
-    }
-  }
-
   let renderResult = renderCardComposition(ctx, {
     bundle,
     mode,
     modeLabel,
     preset,
-    backgroundImage,
-    useTemplateBackground: false,
-    backgroundSource,
+    backgroundImage: null,
+    useTemplateBackground: true,
+    backgroundSource: "stable_template",
   });
 
   let quality = runCardQualityChecks({

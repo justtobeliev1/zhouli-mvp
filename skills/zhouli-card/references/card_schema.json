@@ -1,0 +1,18 @@
+{
+  "identityTag": "string <= 12",
+  "true": {
+    "title": "string <= 40",
+    "desc": "string <= 96",
+    "source": "string <= 32",
+    "empty": false
+  },
+  "mix": {
+    "title": "string <= 42",
+    "desc": "string <= 96"
+  },
+  "parody": {
+    "title": "string <= 42",
+    "desc": "string <= 96"
+  },
+  "markdown": "string <= 900"
+}
