@@ -145,16 +145,23 @@ const USE_MOCK_REPLY = "auto";
 const ONELINK_CONFIG = {
   baseUrl: "https://api.onelinkai.cloud/v1",
   fallbackModel: "claude-opus-4-6",
+  visionFallbackModel: "gemini-2.5-flash",
   imageModel: "gpt-image-1-2026-02-01",
+  memeImageModel: "flux-schnell",
   imageEndpoint: "/images/generations",
   imageSize: "1024x1280",
   imageSteps: 32,
   imageCfg: 7,
   requestTimeoutMs: 35000,
+  uploadMaxBytes: 8 * 1024 * 1024,
+  uploadMaxEdge: 1568,
+  uploadJpegQuality: 0.88,
   keyWindowNames: ["__ONELINK_API_KEY__", "ONELINK_API_KEY", "__ONELINKAI_API_KEY__", "ONELINKAI_API_KEY"],
   keyStorageNames: ["onelink_api_key", "onelinkApiKey", "ONELINK_API_KEY", "OPENAI_API_KEY"],
   modelWindowNames: ["__ONELINK_MODEL__", "ONELINK_MODEL", "__ONELINKAI_MODEL__", "ONELINKAI_MODEL"],
   modelStorageNames: ["onelink_model", "onelinkModel", "ONELINK_MODEL"],
+  visionModelWindowNames: ["__ONELINK_VISION_MODEL__", "ONELINK_VISION_MODEL", "__ONELINKAI_VISION_MODEL__", "ONELINKAI_VISION_MODEL"],
+  visionModelStorageNames: ["onelink_vision_model", "onelinkVisionModel", "ONELINK_VISION_MODEL"],
   styleStorageName: "card_style_preset",
   imageEnabledStorageName: "card_image_enabled",
 };
@@ -162,13 +169,17 @@ const ONELINK_CONFIG = {
 const CARD_SCHEMA_LIMITS = {
   identityTag: 12,
   trueTitle: 40,
-  trueDesc: 96,
+  trueDesc: 120,
   trueSource: 32,
-  mixTitle: 42,
-  mixDesc: 96,
-  parodyTitle: 42,
-  parodyDesc: 96,
-  markdown: 900,
+  mixTitle: 48,
+  mixDesc: 120,
+  parodyTitle: 48,
+  parodyDesc: 120,
+  actionText: 26,
+  actionDesc: 60,
+  actionQuote: 32,
+  actionSource: 32,
+  markdown: 1800,
 };
 
 const CARD_REQUIRED_FIELDS = [
@@ -184,6 +195,9 @@ const CARD_REQUIRED_FIELDS = [
   "markdown",
 ];
 
+const ACTION_SECTION_REQUIRED_FIELDS = ["action", "desc", "quote", "source"];
+const ACTION_MIN_COUNT = 3;
+
 const EXPORT_SIZE = {
   width: 1080,
   height: 1350,
@@ -196,10 +210,10 @@ const IMAGE_NEGATIVE_PROMPT =
   "text, words, letters, watermark, logo, signature, deformed face, low quality, blurry, noisy, jpeg artifacts";
 
 const LLM_JSON_SYSTEM_PROMPT = [
-  "你是“合乎周礼”的古人判词官，面向社交平台用户产出可传播文案。",
+  "你是“合乎周礼”的古人判词官，面向用户产出严谨典雅的评判文案。",
   "前提条件：只要存在可核验的真实古文原句，就优先使用原句并给出真实出处。",
   "知识边界：优先基于周礼相关古代文献进行判断、引用与改写。",
-  "表达风格：一本正经地引经据典，带轻度戏谑和机锋，读起来像古人开麦点评现代破事。",
+  "表达风格：文风必须严谨典雅，引经据典，论理清晰，拒绝使用网络烂梗或过度口语化的词汇。",
   "输出严格 JSON，不要输出 Markdown，不要输出代码块，不要输出额外解释。",
   "JSON 结构必须是：",
   "{",
@@ -207,6 +221,8 @@ const LLM_JSON_SYSTEM_PROMPT = [
   '  "true": {"title":"string","desc":"string","source":"string","empty":false},',
   '  "mix": {"title":"string","desc":"string"},',
   '  "parody": {"title":"string","desc":"string"},',
+  '  "dos": [{"action":"string","desc":"string","quote":"string","source":"string"}],',
+  '  "donts": [{"action":"string","desc":"string","quote":"string","source":"string"}],',
   '  "markdown": "string"',
   "}",
   "要求：",
@@ -219,12 +235,20 @@ const LLM_JSON_SYSTEM_PROMPT = [
   `mix.desc 长度 <= ${CARD_SCHEMA_LIMITS.mixDesc}。`,
   `parody.title 长度 <= ${CARD_SCHEMA_LIMITS.parodyTitle}。`,
   `parody.desc 长度 <= ${CARD_SCHEMA_LIMITS.parodyDesc}。`,
+  `dos.action / donts.action 长度 <= ${CARD_SCHEMA_LIMITS.actionText}。`,
+  `dos.desc / donts.desc 长度 <= ${CARD_SCHEMA_LIMITS.actionDesc}。`,
+  `dos.quote / donts.quote 长度 <= ${CARD_SCHEMA_LIMITS.actionQuote}。`,
+  `dos.source / donts.source 长度 <= ${CARD_SCHEMA_LIMITS.actionSource}。`,
   `markdown 长度 <= ${CARD_SCHEMA_LIMITS.markdown}，并与字段内容一致。`,
   "真引模式必须引用真实古籍原句与出处；若无法确认真实出处，必须写 true.empty=true，true.title=“暂缺可信原句”，true.source=“”。",
   "意译模式强调古今混搭，句子短，适合当评论区回复。",
   "戏仿模式允许夸张和整活，但不做人身攻击，不写脏话。",
+  `dos 与 donts 至少各 ${ACTION_MIN_COUNT} 条，每条都必须给出真实古文原句与真实出处，不得编造。`,
+  "若用户输入较复杂，如游戏、协作、群聊、职场冲突等，必须拆到具体行为层面，例如时机、话术、操作、越界动作、补救动作，而不能只停留在总类词。",
+  "若用户附带图片，先识别图中场景、动作、物件、界面信息，再与文字结合判断；看不清就明确说看不清，不得编造图片细节。",
+  "中文表达必须使用规范标点，绝不能用空格代替逗号、顿号、句号。",
   "禁止缺字段，禁止把 true.empty 写成字符串。",
-  "整体风格：适合小红书/B站传播，短促、有梗、可截图。",
+  "整体风格：严谨、古典、庄重、切中要害。",
 ].join("\n");
 
 const LLM_JSON_REPAIR_PROMPT = [
@@ -269,11 +293,15 @@ const elements = {
   chatViewport: document.getElementById("chatViewport"),
   emptyState: document.getElementById("emptyState"),
   messageList: document.getElementById("messageList"),
+  imageInput: document.getElementById("imageInput"),
   userInput: document.getElementById("userInput"),
   sendBtn: document.getElementById("sendBtn"),
   presetButtons: document.getElementById("presetButtons"),
   charCount: document.getElementById("charCount"),
   statusText: document.getElementById("statusText"),
+  attachImageBtn: document.getElementById("attachImageBtn"),
+  generateMemeCheckbox: document.getElementById("generateMemeCheckbox"),
+  attachmentPreview: document.getElementById("attachmentPreview"),
   downloadCardBtn: document.getElementById("downloadCardBtn"),
   copySkillPromptBtn: document.getElementById("copySkillPromptBtn"),
 };
@@ -285,6 +313,8 @@ const state = {
   hasStarted: false,
   sageCursor: 0,
   isPending: false,
+  pendingAiMessage: null,
+  selectedAttachment: null,
   backgroundCache: new Map(),
   stylePresetId: "",
   loadingMessageEl: null,
@@ -300,6 +330,7 @@ function init() {
   renderPresetButtons();
   bindEvents();
   updateCharCount();
+  renderAttachmentPreview();
   exposeRuntimeApiHelpers();
   const hasApiKey = Boolean(resolveApiKey());
   setStatus(hasApiKey ? "等待输入（真实管线已启用）" : "等待输入（缺少 API Key，将使用 Mock）");
@@ -307,6 +338,10 @@ function init() {
 
 function bindEvents() {
   elements.userInput.addEventListener("input", updateCharCount);
+  elements.imageInput?.addEventListener("change", handleImageSelection);
+  elements.attachImageBtn?.addEventListener("click", () => {
+    elements.imageInput?.click();
+  });
 
   elements.userInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -359,29 +394,39 @@ async function handleSend() {
   }
 
   const input = elements.userInput.value.trim();
-  if (!input) {
-    setStatus("先输入一句处境。", true);
+  const attachment = cloneAttachment(state.selectedAttachment);
+  const generateMeme = elements.generateMemeCheckbox?.checked || false;
+  if (!input && !attachment) {
+    setStatus("先输入一句处境，或上传一张图片。", true);
     return;
   }
 
   ensureConversationStarted();
-  addUserMessage(input);
+  addUserMessage({ text: input, attachment });
   elements.userInput.value = "";
   updateCharCount();
+  clearAttachment();
 
   setComposerBusy(true);
+  addAiLoadingMessage();
   setStatus("正在生成判词…", false);
   showAiLoadingMessage();
 
   try {
-    const result = await generateBundleWithAutoFallback(input);
+    const result = await generateBundleWithAutoFallback({ text: input, attachment });
     const bundle = result.bundle;
-    state.lastInput = input;
+    state.lastInput = input || attachment?.name || "";
     state.lastBundle = bundle;
     state.selectedMode = bundle.true.empty ? "mix" : "true";
-    removeAiLoadingMessage();
-    addAiMessage(bundle);
+    const aiMessageEl = addAiMessage(bundle);
     setStatus(result.statusText, result.isWarn);
+
+    if (generateMeme) {
+      await generateAndAppendMeme(input || attachment?.name || "", aiMessageEl);
+    }
+  } catch (error) {
+    removeAiLoadingMessage();
+    throw error;
   } finally {
     removeAiLoadingMessage();
     setComposerBusy(false);
@@ -409,20 +454,212 @@ function ensureConversationStarted() {
 function addUserMessage(text) {
   const message = document.createElement("article");
   message.className = "message user";
-  message.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+  message.innerHTML = buildUserMessageHtml(text);
   elements.messageList.appendChild(message);
   scrollToBottom();
 }
 
+/**
+ * 生成用户消息气泡，支持文字与图片混排。
+ */
+function buildUserMessageHtml(payload) {
+  const normalized = typeof payload === "string" ? { text: payload, attachment: null } : payload || {};
+  const text = safeText(normalized.text);
+  const attachment = normalized.attachment;
+  const imageHtml = attachment
+    ? `<img class="bubble-image" src="${escapeAttr(attachment.dataUrl)}" alt="${escapeAttr(attachment.name || "用户上传图片")}" />`
+    : "";
+  const textHtml = text ? `<div class="bubble-text">${escapeHtml(text)}</div>` : "";
+  return `<div class="bubble user-bubble-content">${imageHtml}${textHtml}</div>`;
+}
+
+/**
+ * 处理用户选择图片后的预处理与预览。
+ */
+async function handleImageSelection(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) {
+    return;
+  }
+
+  try {
+    state.selectedAttachment = await prepareImageAttachment(file);
+    renderAttachmentPreview();
+    setStatus("图片已加入本次提问。", false);
+  } catch (error) {
+    clearAttachment();
+    setStatus(`图片处理失败：${simplifyErrorMessage(error)}`, true);
+  } finally {
+    if (elements.imageInput) {
+      elements.imageInput.value = "";
+    }
+  }
+}
+
+/**
+ * 将图片文件压缩并转为可直接发送给模型的 data URL。
+ */
+async function prepareImageAttachment(file) {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("仅支持图片文件");
+  }
+  if (file.size > ONELINK_CONFIG.uploadMaxBytes) {
+    throw new Error("图片过大，请控制在 8MB 以内");
+  }
+
+  const optimized = await optimizeImageFile(file);
+  return {
+    name: file.name || "image",
+    mimeType: optimized.mimeType,
+    dataUrl: optimized.dataUrl,
+  };
+}
+
+/**
+ * 在浏览器端压缩图片，减少图文请求体积并提升稳定性。
+ */
+async function optimizeImageFile(file) {
+  const dataUrl = await fileToDataUrl(file);
+  const image = await loadImageFromDataUrl(dataUrl);
+  const longestEdge = Math.max(image.width, image.height);
+
+  if (longestEdge <= ONELINK_CONFIG.uploadMaxEdge && file.type === "image/jpeg") {
+    return { dataUrl, mimeType: file.type || "image/jpeg" };
+  }
+
+  const scale = Math.min(1, ONELINK_CONFIG.uploadMaxEdge / longestEdge);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("浏览器不支持图片压缩");
+  }
+
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return {
+    dataUrl: canvas.toDataURL("image/jpeg", ONELINK_CONFIG.uploadJpegQuality),
+    mimeType: "image/jpeg",
+  };
+}
+
+/**
+ * 将文件读取为 data URL，供本地预览与接口发送复用。
+ */
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 刷新附件预览区，展示当前待发送图片。
+ */
+function renderAttachmentPreview() {
+  if (!elements.attachmentPreview) {
+    return;
+  }
+
+  const attachment = state.selectedAttachment;
+  if (!attachment) {
+    elements.attachmentPreview.hidden = true;
+    elements.attachmentPreview.innerHTML = "";
+    return;
+  }
+
+  elements.attachmentPreview.hidden = false;
+  elements.attachmentPreview.innerHTML = `
+    <div class="attachment-card">
+      <img class="attachment-thumb" src="${escapeAttr(attachment.dataUrl)}" alt="${escapeAttr(attachment.name)}" />
+      <div class="attachment-meta">
+        <span class="attachment-name">${escapeHtml(attachment.name)}</span>
+        <span class="attachment-tip">将与文字一起发送给孔子</span>
+      </div>
+      <button class="attachment-remove-btn" type="button" data-action="remove-attachment">移除</button>
+    </div>
+  `;
+
+  elements.attachmentPreview
+    .querySelector('[data-action="remove-attachment"]')
+    ?.addEventListener("click", clearAttachment);
+}
+
+/**
+ * 清空当前已选择的附件，并同步刷新输入区状态。
+ */
+function clearAttachment() {
+  state.selectedAttachment = null;
+  renderAttachmentPreview();
+}
+
+/**
+ * 复制附件对象，避免后续界面清空时影响正在发送的请求数据。
+ */
+function cloneAttachment(attachment) {
+  if (!attachment) {
+    return null;
+  }
+  return {
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    dataUrl: attachment.dataUrl,
+  };
+}
+
+/**
+ * 固定返回孔子，保持聊天对象形象一致。
+ */
 function nextSageName() {
-  const name = SAGE_NAMES[state.sageCursor % SAGE_NAMES.length];
-  state.sageCursor += 1;
-  return name;
+  return "孔子";
+}
+
+/**
+ * 在等待模型响应时插入占位消息，避免界面空白。
+ */
+function addAiLoadingMessage() {
+  removeAiLoadingMessage();
+
+  const sageName = nextSageName();
+  const message = document.createElement("article");
+  message.className = "message ai loading";
+  message.setAttribute("aria-live", "polite");
+  message.innerHTML = `
+    <div class="ai-topline">
+      <img class="ai-avatar" src="./confucius.jpg" alt="${escapeHtml(sageName)}头像" />
+      <span class="ai-name">${escapeHtml(sageName)}</span>
+      <span class="ai-role">古人锐评</span>
+    </div>
+    <div class="bubble ai-loading-bubble" aria-label="正在生成回复">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <span class="loading-text">孔子正在斟酌判词…</span>
+    </div>
+  `;
+
+  state.pendingAiMessage = message;
+  elements.messageList.appendChild(message);
+  scrollToBottom();
+}
+
+/**
+ * 在真实回复完成或出错后移除加载中的占位消息。
+ */
+function removeAiLoadingMessage() {
+  if (!state.pendingAiMessage) {
+    return;
+  }
+
+  state.pendingAiMessage.remove();
+  state.pendingAiMessage = null;
 }
 
 function addAiMessage(bundle) {
   const sageName = state.pendingSageName || nextSageName();
   state.pendingSageName = "";
+  removeAiLoadingMessage();
   const message = document.createElement("article");
   message.className = "message ai ai-enter";
   const markdown = bundle.markdown || buildAssistantMarkdown(bundle);
@@ -440,6 +677,7 @@ function addAiMessage(bundle) {
 
   elements.messageList.appendChild(message);
   scrollToBottom();
+  return message;
 }
 
 function showAiLoadingMessage() {
@@ -479,7 +717,8 @@ function removeAiLoadingMessage() {
 }
 
 function buildMockBundle(input) {
-  const summary = summarizeInput(input);
+  const summary = summarizeInput(input || "图片所示处境");
+  const actionLists = buildMockActionLists();
   const bundle = {
     identityTag: "当代问礼客",
     true: {
@@ -500,16 +739,71 @@ function buildMockBundle(input) {
       source: "",
       empty: false,
     },
+    dos: actionLists.dos,
+    donts: actionLists.donts,
     generatedAt: formatTime(new Date()),
   };
   bundle.markdown = buildAssistantMarkdown(bundle);
   return bundle;
 }
 
-async function generateBundleWithAutoFallback(input) {
+/**
+ * 为兜底场景提供带真实引文的行动清单，避免结构化输出缺项。
+ */
+function buildMockActionLists() {
+  return {
+    dos: [
+      {
+        action: "先讲边界",
+        desc: "先把自己不能接受的点说清楚，再谈后续安排。",
+        quote: "己所不欲，勿施于人。",
+        source: "《论语·颜渊》",
+      },
+      {
+        action: "先定规矩",
+        desc: "把时段、分工、节奏定下来，减少反复扯皮。",
+        quote: "不以规矩，不能成方圆。",
+        source: "《孟子·离娄上》",
+      },
+      {
+        action: "先做准备",
+        desc: "提前留出缓冲和备选方案，别等事到临头才救火。",
+        quote: "凡事预则立，不预则废。",
+        source: "《礼记·中庸》",
+      },
+    ],
+    donts: [
+      {
+        action: "不要失约甩锅",
+        desc: "答应了就兑现，做不到也要尽快说明，不可装没看见。",
+        quote: "人而无信，不知其可也。",
+        source: "《论语·为政》",
+      },
+      {
+        action: "不要只怪别人",
+        desc: "先看自己是否有表达不清、准备不足、响应过慢的问题。",
+        quote: "君子求诸己，小人求诸人。",
+        source: "《论语·卫灵公》",
+      },
+      {
+        action: "不要错了不改",
+        desc: "发现问题就及时修正，别一错再错，把小事拖成大事。",
+        quote: "过而不改，是谓过矣。",
+        source: "《论语·卫灵公》",
+      },
+    ],
+  };
+}
+
+/**
+ * 根据输入类型选择文本或视觉模型，并在失败时回退到本地兜底结果。
+ */
+async function generateBundleWithAutoFallback(payload) {
+  const text = extractUserText(payload);
+  const hasImage = Boolean(payload?.attachment?.dataUrl);
   if (USE_MOCK_REPLY === true) {
     return {
-      bundle: buildMockBundle(input),
+      bundle: buildMockBundle(text),
       statusText: "当前为 Mock 固定模式。",
       isWarn: true,
     };
@@ -518,41 +812,120 @@ async function generateBundleWithAutoFallback(input) {
   const apiKey = resolveApiKey();
   if (!apiKey) {
     return {
-      bundle: buildMockBundle(input),
+      bundle: buildMockBundle(text),
       statusText: "未检测到 API Key，已使用 Mock 结果。",
       isWarn: true,
     };
   }
 
   try {
-    const activeModel = resolveModel();
-    const llmResult = await requestCardSchemaWithRepair(input, apiKey, activeModel);
-    const bundle = enforceCardSchema(llmResult.bundle, input);
+    const activeModel = resolveModel({ hasImage });
+    const llmResult = await requestCardSchemaWithRepair(payload, apiKey, activeModel);
+    const bundle = enforceCardSchema(llmResult.bundle, text);
     bundle.__meta = {
       copySource: llmResult.repaired ? "llm_repaired" : "llm",
       model: activeModel,
+      hasImage,
     };
     return {
       bundle,
       statusText: llmResult.repaired
         ? `真实模型生成完成（${activeModel}，已自动修复格式）。`
-        : `真实模型生成完成（${activeModel}）。`,
+        : `真实模型生成完成（${activeModel}${hasImage ? "，含图片分析" : ""}）。`,
       isWarn: false,
     };
   } catch (error) {
     console.error("[onelink] request failed", error);
     return {
-      bundle: buildMockBundle(input),
+      bundle: buildMockBundle(text),
       statusText: `真实接口失败，已回退 Mock（${simplifyErrorMessage(error)}）`,
       isWarn: true,
     };
   }
 }
 
-async function requestCardSchemaWithRepair(input, apiKey, model) {
-  const firstText = await requestOneLinkCompletion(buildCardJsonMessages(input), apiKey, model, {
+async function generateAndAppendMeme(input, aiMessageEl) {
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    return;
+  }
+
+  const container = aiMessageEl.querySelector(".bubble.ai-markdown");
+  if (!container) return;
+
+  const loadingEl = document.createElement("div");
+  loadingEl.className = "ai-meme-loading";
+  loadingEl.innerHTML = `<span class="loading-spinner" aria-hidden="true"></span><span>孔子正在画图…</span>`;
+  container.appendChild(loadingEl);
+  scrollToBottom();
+
+  try {
+    const prompt = `A highly exaggerated, hilarious comic illustration of Confucius (ancient Chinese philosopher) reacting to or dealing with this situation: "${input}". Funny meme style, expressive face, dramatic poses, clean background, high quality, no text.`;
+    
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), ONELINK_CONFIG.requestTimeoutMs);
+
+    const response = await fetch(`${ONELINK_CONFIG.baseUrl}${ONELINK_CONFIG.imageEndpoint}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: ONELINK_CONFIG.memeImageModel || "flux-schnell",
+        prompt,
+        size: "1024x1024",
+      }),
+      signal: controller.signal,
+    });
+
+    window.clearTimeout(timer);
+
+    const rawText = await response.text();
+    let payload = {};
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = {};
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error(extractApiErrorMessage(response.status, payload, rawText));
+    }
+
+    const dataUrl = payload.data?.[0]?.url || payload.data?.[0]?.b64_json;
+    if (!dataUrl) {
+      throw new Error("返回的图片数据为空");
+    }
+
+    const imgUrl = dataUrl.startsWith("http") ? dataUrl : `data:image/jpeg;base64,${dataUrl}`;
+    
+    loadingEl.remove();
+    
+    const imgEl = document.createElement("img");
+    imgEl.className = "ai-meme-image";
+    imgEl.src = imgUrl;
+    imgEl.alt = "孔子梗图";
+    imgEl.onload = () => scrollToBottom();
+    
+    container.appendChild(imgEl);
+    setStatus("梗图生成完成。", false);
+
+  } catch (error) {
+    loadingEl.innerHTML = `<span>梗图生成失败：${simplifyErrorMessage(error)}</span>`;
+    setStatus(`梗图失败：${simplifyErrorMessage(error)}`, true);
+  }
+}
+
+/**
+ * 请求结构化判词，并在模型输出不合规时自动触发 JSON 修复。
+ */
+async function requestCardSchemaWithRepair(payload, apiKey, model) {
+  const firstText = await requestOneLinkCompletion(buildCardJsonMessages(payload), apiKey, model, {
     temperature: 0.55,
-    maxTokens: 1400,
+    maxTokens: 2200,
   });
 
   const firstJson = parseJsonFromLlmText(firstText);
@@ -565,7 +938,7 @@ async function requestCardSchemaWithRepair(input, apiKey, model) {
     buildRepairMessages(firstText, firstValidation.errors),
     apiKey,
     model,
-    { temperature: 0.2, maxTokens: 1400 },
+    { temperature: 0.2, maxTokens: 2200 },
   );
 
   const repairedJson = parseJsonFromLlmText(repairedText);
@@ -631,7 +1004,27 @@ async function requestOneLinkCompletion(messages, apiKey, model, options = {}) {
   }
 }
 
-function buildCardJsonMessages(input) {
+/**
+ * 构建发送给模型的消息体，支持纯文本和图文混合输入。
+ */
+function buildCardJsonMessages(payload) {
+  const text = extractUserText(payload);
+  const attachment = payload?.attachment || null;
+  const promptText = buildSituationPrompt({ text, attachment });
+
+  if (!attachment?.dataUrl) {
+    return [
+      {
+        role: "system",
+        content: LLM_JSON_SYSTEM_PROMPT,
+      },
+      {
+        role: "user",
+        content: promptText,
+      },
+    ];
+  }
+
   return [
     {
       role: "system",
@@ -640,13 +1033,40 @@ function buildCardJsonMessages(input) {
     {
       role: "user",
       content: [
-        "请按固定 schema 输出 JSON，三种模式都要给出。",
-        "语气要像古人判词，兼顾传播感和梗感。",
-        "用户处境：",
-        input,
-      ].join("\n"),
+        { type: "text", text: promptText },
+        { type: "image_url", image_url: { url: attachment.dataUrl } },
+      ],
     },
   ];
+}
+
+/**
+ * 抽取用户输入文字，兼容旧调用与空输入场景。
+ */
+function extractUserText(payload) {
+  if (typeof payload === "string") {
+    return payload.trim();
+  }
+  return safeText(payload?.text);
+}
+
+/**
+ * 为模型拼接分析指令，要求它结合图片和文字拆解到具体行为层面。
+ */
+function buildSituationPrompt({ text, attachment }) {
+  const lines = [
+    "请按固定 schema 输出 JSON，真引、意译、戏仿、可为、不可为都要给出。",
+    "先判断是否存在复杂行为链；若存在，必须拆到具体操作、时机、边界、补救动作与失礼动作。",
+  ];
+
+  if (attachment?.dataUrl) {
+    lines.push("用户附带了一张图片。请先识别图片中的场景、行为、物件、界面信息，再与文字一起判断。");
+    lines.push(`图片文件名：${attachment.name || "未命名图片"}`);
+  }
+
+  lines.push("用户处境：");
+  lines.push(text || "用户仅上传了图片，请仅根据图片可见内容判断。");
+  return lines.join("\n");
 }
 
 function buildRepairMessages(rawText, errors) {
@@ -778,6 +1198,8 @@ function buildCardSchemaTemplate() {
     true: { title: "string", desc: "string", source: "string", empty: false },
     mix: { title: "string", desc: "string" },
     parody: { title: "string", desc: "string" },
+    dos: [{ action: "string", desc: "string", quote: "string", source: "string" }],
+    donts: [{ action: "string", desc: "string", quote: "string", source: "string" }],
     markdown: "string",
   };
 }
@@ -892,7 +1314,41 @@ function validateCardPayload(payload) {
     }
   });
 
+  validateActionSection(payload?.dos, "dos", errors);
+  validateActionSection(payload?.donts, "donts", errors);
+
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * 校验可为与不可为清单，确保条数、字段和文案格式都符合要求。
+ */
+function validateActionSection(list, fieldName, errors) {
+  if (!Array.isArray(list)) {
+    errors.push(`${fieldName} 必须是数组`);
+    return;
+  }
+  if (list.length < ACTION_MIN_COUNT) {
+    errors.push(`${fieldName} 至少需要 ${ACTION_MIN_COUNT} 条`);
+  }
+
+  list.forEach((item, index) => {
+    if (!item || typeof item !== "object") {
+      errors.push(`${fieldName}[${index}] 必须是对象`);
+      return;
+    }
+
+    ACTION_SECTION_REQUIRED_FIELDS.forEach((key) => {
+      const value = item[key];
+      if (typeof value !== "string" || !value.trim()) {
+        errors.push(`${fieldName}[${index}].${key} 必须是非空字符串`);
+        return;
+      }
+      if (containsSuspiciousChineseSpacing(value)) {
+        errors.push(`${fieldName}[${index}].${key} 标点疑似不规范`);
+      }
+    });
+  });
 }
 
 function enforceCardSchema(rawPayload, input) {
@@ -904,21 +1360,23 @@ function enforceCardSchema(rawPayload, input) {
   const parodyRaw = raw.parody && typeof raw.parody === "object" ? raw.parody : {};
 
   const bundle = {
-    identityTag: clipTextWithEllipsis(safeText(raw.identityTag) || fallback.identityTag, CARD_SCHEMA_LIMITS.identityTag),
+    identityTag: clipTextWithEllipsis(normalizeGeneratedText(raw.identityTag) || fallback.identityTag, CARD_SCHEMA_LIMITS.identityTag),
     true: {
-      title: clipTextWithEllipsis(safeText(trueRaw.title) || fallback.true.title, CARD_SCHEMA_LIMITS.trueTitle),
-      desc: clipTextWithEllipsis(safeText(trueRaw.desc) || fallback.true.desc, CARD_SCHEMA_LIMITS.trueDesc),
-      source: clipTextWithEllipsis(safeText(trueRaw.source) || fallback.true.source, CARD_SCHEMA_LIMITS.trueSource),
+      title: clipTextWithEllipsis(normalizeGeneratedText(trueRaw.title) || fallback.true.title, CARD_SCHEMA_LIMITS.trueTitle),
+      desc: clipTextWithEllipsis(normalizeGeneratedText(trueRaw.desc) || fallback.true.desc, CARD_SCHEMA_LIMITS.trueDesc),
+      source: clipTextWithEllipsis(normalizeGeneratedText(trueRaw.source) || fallback.true.source, CARD_SCHEMA_LIMITS.trueSource),
       empty: Boolean(trueRaw.empty),
     },
     mix: {
-      title: clipTextWithEllipsis(safeText(mixRaw.title) || fallback.mix.title, CARD_SCHEMA_LIMITS.mixTitle),
-      desc: clipTextWithEllipsis(safeText(mixRaw.desc) || fallback.mix.desc, CARD_SCHEMA_LIMITS.mixDesc),
+      title: clipTextWithEllipsis(normalizeGeneratedText(mixRaw.title) || fallback.mix.title, CARD_SCHEMA_LIMITS.mixTitle),
+      desc: clipTextWithEllipsis(normalizeGeneratedText(mixRaw.desc) || fallback.mix.desc, CARD_SCHEMA_LIMITS.mixDesc),
     },
     parody: {
-      title: clipTextWithEllipsis(safeText(parodyRaw.title) || fallback.parody.title, CARD_SCHEMA_LIMITS.parodyTitle),
-      desc: clipTextWithEllipsis(safeText(parodyRaw.desc) || fallback.parody.desc, CARD_SCHEMA_LIMITS.parodyDesc),
+      title: clipTextWithEllipsis(normalizeGeneratedText(parodyRaw.title) || fallback.parody.title, CARD_SCHEMA_LIMITS.parodyTitle),
+      desc: clipTextWithEllipsis(normalizeGeneratedText(parodyRaw.desc) || fallback.parody.desc, CARD_SCHEMA_LIMITS.parodyDesc),
     },
+    dos: normalizeActionItems(raw.dos, fallback.dos),
+    donts: normalizeActionItems(raw.donts, fallback.donts),
     generatedAt: formatTime(new Date()),
   };
 
@@ -956,7 +1414,7 @@ function hasRequiredCardFields(bundle) {
   }
 
   const allowEmptyStringPaths = new Set(["true.source"]);
-  return CARD_REQUIRED_FIELDS.every((path) => {
+  const baseValid = CARD_REQUIRED_FIELDS.every((path) => {
     const value = readByPath(bundle, path);
     if (value === undefined || value === null) {
       return false;
@@ -972,6 +1430,78 @@ function hasRequiredCardFields(bundle) {
     }
     return value.trim().length > 0;
   });
+
+  return baseValid && hasActionItems(bundle.dos) && hasActionItems(bundle.donts);
+}
+
+/**
+ * 归一化模型返回的行动清单，统一裁剪长度与标点格式。
+ */
+function normalizeActionItems(rawList, fallbackList) {
+  const sourceList = Array.isArray(rawList) && rawList.length ? rawList : fallbackList;
+  const normalized = sourceList
+    .map((item, index) => {
+      const fallbackItem = fallbackList[index % fallbackList.length];
+      return {
+        action: clipTextWithEllipsis(normalizeGeneratedText(item?.action) || fallbackItem.action, CARD_SCHEMA_LIMITS.actionText),
+        desc: clipTextWithEllipsis(normalizeGeneratedText(item?.desc) || fallbackItem.desc, CARD_SCHEMA_LIMITS.actionDesc),
+        quote: clipTextWithEllipsis(normalizeGeneratedText(item?.quote) || fallbackItem.quote, CARD_SCHEMA_LIMITS.actionQuote),
+        source: clipTextWithEllipsis(normalizeGeneratedText(item?.source) || fallbackItem.source, CARD_SCHEMA_LIMITS.actionSource),
+      };
+    })
+    .filter((item) => item.action && item.desc && item.quote && item.source);
+
+  while (normalized.length < ACTION_MIN_COUNT) {
+    const fallbackItem = fallbackList[normalized.length % fallbackList.length];
+    normalized.push({ ...fallbackItem });
+  }
+  return normalized.slice(0, Math.max(ACTION_MIN_COUNT, normalized.length));
+}
+
+/**
+ * 检查行动清单是否满足最小条数与字段完整性。
+ */
+function hasActionItems(list) {
+  return (
+    Array.isArray(list) &&
+    list.length >= ACTION_MIN_COUNT &&
+    list.every(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        ACTION_SECTION_REQUIRED_FIELDS.every((key) => typeof item[key] === "string" && item[key].trim()),
+    )
+  );
+}
+
+/**
+ * 规范模型输出的中文标点，尽量消除空格替代逗号与句号的问题。
+ */
+function normalizeGeneratedText(value) {
+  const text = safeText(value);
+  if (!text) {
+    return "";
+  }
+
+  return text
+    .replace(/\u00A0/g, " ")
+    .replace(/([。！？；：，、）】》」』])\1+/g, "$1") // 清理重复标点如。。
+    .replace(/\s+([，。！？；：、）】》」』])/g, "$1")
+    .replace(/([（【《「『])\s+/g, "$1")
+    .replace(/(?<=[\u4e00-\u9fff])\s*,\s*(?=[\u4e00-\u9fff])/gu, "，")
+    .replace(/(?<=[\u4e00-\u9fff])\s*\.\s*(?=[\u4e00-\u9fff])/gu, "。")
+    .replace(/(?<=[\u4e00-\u9fff])\s*;\s*(?=[\u4e00-\u9fff])/gu, "；")
+    .replace(/(?<=[\u4e00-\u9fff])\s*:\s*(?=[\u4e00-\u9fff])/gu, "：")
+    .replace(/(?<=[\u4e00-\u9fff」』】）》])\s+(?=[\u4e00-\u9fff「『（【《])/gu, "，")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+/**
+ * 检测中文语句中是否存在疑似用空格替代标点的异常格式。
+ */
+function containsSuspiciousChineseSpacing(value) {
+  return /[\u4e00-\u9fff」』】）》]\s+[\u4e00-\u9fff「『（【《]/u.test(String(value || ""));
 }
 
 function readByPath(obj, path) {
@@ -1163,11 +1693,28 @@ function resolveApiKey() {
   return pickWindowValue(ONELINK_CONFIG.keyWindowNames);
 }
 
-function resolveModel() {
+/**
+ * 根据当前请求类型选择文本模型或视觉模型。
+ */
+function resolveModel(options = {}) {
+  if (options.hasImage) {
+    return resolveVisionModel();
+  }
   return (
     pickWindowValue(ONELINK_CONFIG.modelWindowNames) ||
     pickStorageValue(ONELINK_CONFIG.modelStorageNames) ||
     ONELINK_CONFIG.fallbackModel
+  );
+}
+
+/**
+ * 解析图文请求所使用的视觉模型，优先读取用户配置。
+ */
+function resolveVisionModel() {
+  return (
+    pickWindowValue(ONELINK_CONFIG.visionModelWindowNames) ||
+    pickStorageValue(ONELINK_CONFIG.visionModelStorageNames) ||
+    ONELINK_CONFIG.visionFallbackModel
   );
 }
 
@@ -1431,6 +1978,9 @@ function buildParodyResult(input) {
   };
 }
 
+/**
+ * 根据结构化字段重建展示文案，确保标点、段落与清单格式稳定。
+ */
 function buildAssistantMarkdown(bundle) {
   const trueBlock = bundle.true.empty
     ? [
@@ -1444,6 +1994,8 @@ function buildAssistantMarkdown(bundle) {
         `${bundle.true.desc}`,
         `出处：${bundle.true.source || "（无）"}`,
       ];
+  const dos = hasActionItems(bundle.dos) ? bundle.dos : buildMockActionLists().dos;
+  const donts = hasActionItems(bundle.donts) ? bundle.donts : buildMockActionLists().donts;
 
   return [
     `### ${bundle.identityTag}`,
@@ -1458,8 +2010,24 @@ function buildAssistantMarkdown(bundle) {
     `> ${bundle.parody.title}`,
     `${bundle.parody.desc}`,
     "",
+    "### 可为",
+    ...formatActionListMarkdown(dos),
+    "",
+    "### 不可为",
+    ...formatActionListMarkdown(donts),
+    "",
     "`#这合乎周礼吗 #可复制 #可截图`",
   ].join("\n");
+}
+
+/**
+ * 将行动清单格式化为单层 Markdown 列表，便于当前渲染器稳定显示。
+ */
+function formatActionListMarkdown(list) {
+  return list.map(
+    (item) =>
+      `- ${item.action}：${item.desc}。引「${item.quote}」${item.source ? `（${item.source}）` : ""}`,
+  );
 }
 
 function buildSkillInstallPrompt() {
@@ -1775,6 +2343,11 @@ function renderAnswerCard(ctx, { bundle, preset, mode, modeLabel }) {
   ctx.textAlign = "left"; // reset
 }
 
+function drawConfuciusBackground(ctx) {
+  // We expect confucius image to be preloaded or we can use a small inline data URL if needed.
+  // Instead of waiting async, I'll draw it synchronously if it's in the DOM, or we can await it in exportCardAsPng.
+}
+
 function renderCardComposition(
   ctx,
   {
@@ -1784,6 +2357,7 @@ function renderCardComposition(
     preset,
     layoutPlan = null,
     backgroundImage,
+    confuciusImg,
     useTemplateBackground = false,
     backgroundSource = "template",
   },
@@ -1811,6 +2385,16 @@ function renderCardComposition(
     ctx.fillRect(0, 0, width, height);
   } else {
     drawStableTemplateBackground(ctx, preset);
+    if (confuciusImg) {
+      ctx.save();
+      ctx.globalAlpha = 0.05;
+      ctx.globalCompositeOperation = "luminosity";
+      const scale = Math.max(width / confuciusImg.width, height / confuciusImg.height);
+      const dw = confuciusImg.width * scale * 1.5;
+      const dh = confuciusImg.height * scale * 1.5;
+      ctx.drawImage(confuciusImg, width - dw * 0.6, height - dh * 0.7, dw, dh);
+      ctx.restore();
+    }
   }
 
   drawTexture(ctx, width, height, preset.textureStrength || 0.12);
@@ -2133,14 +2717,26 @@ function fitTextBlock(
 function measureWrappedLines(ctx, text, maxWidth) {
   const lines = [];
   const paragraphs = String(text || "").split("\n");
+  const avoidStartChars = new Set(["，", "。", "、", "；", "：", "？", "！", "”", "’", "】", "》", "）"]);
 
   paragraphs.forEach((paragraph, index) => {
     let line = "";
-    for (const char of paragraph) {
-      const next = line + char;
+    for (let i = 0; i < paragraph.length; i++) {
+      const char = paragraph[i];
+      let next = line + char;
+      
+      // Lookahead for punctuation avoidance
+      if (i + 1 < paragraph.length) {
+        const nextChar = paragraph[i + 1];
+        if (avoidStartChars.has(nextChar)) {
+          next += nextChar;
+          i++; // Consume the punctuation early
+        }
+      }
+
       if (ctx.measureText(next).width > maxWidth && line) {
         lines.push(line);
-        line = char;
+        line = next.slice(line.length); // Keep the overflowing part for next line
       } else {
         line = next;
       }

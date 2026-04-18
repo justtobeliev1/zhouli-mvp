@@ -276,9 +276,32 @@ body.has-messages .empty-state {
   max-width: min(100%, 620px);
 }
 
+.user-bubble-content {
+  display: grid;
+  gap: 10px;
+}
+
+.bubble-image {
+  width: min(100%, 320px);
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: 14px;
+  display: block;
+}
+
+.bubble-text {
+  white-space: pre-wrap;
+}
+
 .ai .bubble {
   background: var(--ai-bubble);
   max-width: min(100%, 820px);
+}
+
+.message.ai.loading .bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .ai-topline {
@@ -316,6 +339,25 @@ body.has-messages .empty-state {
 .ai-markdown {
   font-size: 15px;
   line-height: 1.78;
+}
+
+.ai-loading-bubble {
+  color: #425463;
+}
+
+.loading-text {
+  white-space: nowrap;
+}
+
+.loading-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #d7e1ef;
+  border-top-color: #4f79b5;
+  border-radius: 999px;
+  display: inline-block;
+  flex: 0 0 auto;
+  animation: spinner-rotate 0.8s linear infinite;
 }
 
 .ai-markdown > :first-child {
@@ -400,6 +442,29 @@ body.has-messages .empty-state {
   border-radius: 10px;
   padding: 10px 12px;
   overflow-x: auto;
+}
+
+.ai-meme-image {
+  margin-top: 12px;
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border-light);
+  display: block;
+}
+
+.ai-meme-loading {
+  margin-top: 12px;
+  padding: 16px;
+  text-align: center;
+  background: var(--surface-bg);
+  border-radius: 8px;
+  border: 1px solid var(--border-light);
+  color: var(--text-tertiary);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .ai-markdown pre code {
@@ -560,6 +625,61 @@ body.has-messages .empty-state {
   padding: 10px;
 }
 
+.attachment-preview {
+  padding: 0 8px 6px;
+}
+
+.attachment-card {
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #d7dee8;
+  border-radius: 16px;
+  background: #f7f9fc;
+  padding: 8px;
+}
+
+.attachment-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  object-fit: cover;
+  display: block;
+}
+
+.attachment-meta {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.attachment-name {
+  color: #22313f;
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-tip {
+  color: #6f7b88;
+  font-size: 12px;
+}
+
+.attachment-remove-btn {
+  min-height: 30px;
+  border: 1px solid #d8dee6;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #5a6673;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 textarea {
   width: 100%;
   min-height: 66px;
@@ -608,6 +728,19 @@ button:focus-visible {
 #charCount {
   color: #7a8592;
   font-size: 12px;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.checkbox-label input {
+  cursor: pointer;
 }
 
 .text-btn {
@@ -756,6 +889,18 @@ button:focus-visible {
 }
 
 @keyframes ringSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes spinner-rotate {
+  from {
+    transform: rotate(0deg);
+  }
   to {
     transform: rotate(360deg);
   }
@@ -769,7 +914,6 @@ button:focus-visible {
     transform: translateX(250%);
   }
 }
-
 .sr-only {
   position: absolute;
   width: 1px;
@@ -839,6 +983,19 @@ button:focus-visible {
 
   .prompt-row {
     padding: 0 4px 2px;
+  }
+
+  .attachment-card {
+    grid-template-columns: 52px 1fr;
+  }
+
+  .attachment-thumb {
+    width: 52px;
+    height: 52px;
+  }
+
+  .attachment-remove-btn {
+    grid-column: 1 / -1;
   }
 
   .mode-head {
