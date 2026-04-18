@@ -233,6 +233,22 @@ const LLM_JSON_REPAIR_PROMPT = [
   "不要输出解释，只输出 JSON。",
 ].join("\n");
 
+const LLM_LAYOUT_SYSTEM_PROMPT = [
+  "你是海报排版设计助手，只输出严格 JSON，不输出解释。",
+  "任务：为1080x1350竖版古风卡片提供排版参数。",
+  "输出结构：",
+  "{",
+  '  "template": "focus|triptych",',
+  '  "titleStart": 44,',
+  '  "titleMin": 30,',
+  '  "bodyStart": 28,',
+  '  "bodyMin": 20,',
+  '  "sectionGap": 16,',
+  '  "lineHeightRatio": 1.34',
+  "}",
+  "约束：数值要在合理范围内，避免文本溢出，优先保证可读性与视觉平衡。",
+].join("\n");
+
 const TAG_BY_THEME = {
   roommate: ["室友受难", "夜半清修", "同屋守礼"],
   teamwork: ["小组孤忠", "协作稽核", "回收督办"],
@@ -271,6 +287,10 @@ const state = {
   isPending: false,
   backgroundCache: new Map(),
   stylePresetId: "",
+  loadingMessageEl: null,
+  pendingSageName: "",
+  exportOverlayEl: null,
+  isExporting: false,
 };
 
 init();
@@ -351,6 +371,7 @@ async function handleSend() {
 
   setComposerBusy(true);
   setStatus("正在生成判词…", false);
+  showAiLoadingMessage();
 
   try {
     const result = await generateBundleWithAutoFallback(input);
@@ -358,9 +379,11 @@ async function handleSend() {
     state.lastInput = input;
     state.lastBundle = bundle;
     state.selectedMode = bundle.true.empty ? "mix" : "true";
+    removeAiLoadingMessage();
     addAiMessage(bundle);
     setStatus(result.statusText, result.isWarn);
   } finally {
+    removeAiLoadingMessage();
     setComposerBusy(false);
   }
 }
@@ -398,9 +421,10 @@ function nextSageName() {
 }
 
 function addAiMessage(bundle) {
-  const sageName = nextSageName();
+  const sageName = state.pendingSageName || nextSageName();
+  state.pendingSageName = "";
   const message = document.createElement("article");
-  message.className = "message ai";
+  message.className = "message ai ai-enter";
   const markdown = bundle.markdown || buildAssistantMarkdown(bundle);
 
   message.innerHTML = `
@@ -416,6 +440,42 @@ function addAiMessage(bundle) {
 
   elements.messageList.appendChild(message);
   scrollToBottom();
+}
+
+function showAiLoadingMessage() {
+  removeAiLoadingMessage();
+  const sageName = nextSageName();
+  state.pendingSageName = sageName;
+  const message = document.createElement("article");
+  message.className = "message ai ai-loading";
+  message.innerHTML = `
+    <div class="ai-topline">
+      <img class="ai-avatar" src="./confucius.jpg" alt="${escapeHtml(sageName)}头像" />
+      <span class="ai-name">${escapeHtml(sageName)}</span>
+      <span class="ai-role">古人锐评</span>
+    </div>
+    <div class="bubble ai-loading-bubble" aria-live="polite">
+      <span class="ink-loader" aria-hidden="true"><i></i></span>
+      <span class="loading-copy">
+        <strong>夫子执笔中</strong>
+        <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      </span>
+      <span class="loading-sheen" aria-hidden="true"></span>
+    </div>
+  `;
+  state.loadingMessageEl = message;
+  elements.messageList.appendChild(message);
+  scrollToBottom();
+}
+
+function removeAiLoadingMessage() {
+  if (state.loadingMessageEl && state.loadingMessageEl.parentNode) {
+    state.loadingMessageEl.parentNode.removeChild(state.loadingMessageEl);
+  }
+  state.loadingMessageEl = null;
+  if (!state.isPending) {
+    state.pendingSageName = "";
+  }
 }
 
 function buildMockBundle(input) {
@@ -607,6 +667,111 @@ function buildRepairMessages(rawText, errors) {
   ];
 }
 
+function buildLayoutMessages(bundle, mode) {
+  const selected = bundle[mode] || bundle.mix || {};
+  return [
+    { role: "system", content: LLM_LAYOUT_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        "请根据以下内容给出排版参数 JSON。",
+        `mode: ${MODE_META[mode]?.label || mode}`,
+        `identityTag: ${bundle.identityTag}`,
+        `true.title: ${bundle.true?.title || ""}`,
+        `true.desc: ${bundle.true?.desc || ""}`,
+        `mix.title: ${bundle.mix?.title || ""}`,
+        `mix.desc: ${bundle.mix?.desc || ""}`,
+        `parody.title: ${bundle.parody?.title || ""}`,
+        `parody.desc: ${bundle.parody?.desc || ""}`,
+        `selected.title: ${selected.title || ""}`,
+        `selected.desc: ${selected.desc || ""}`,
+      ].join("\n"),
+    },
+  ];
+}
+
+function parseLayoutPlan(rawText) {
+  const parsed = parseJsonFromLlmText(rawText);
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const templateRaw = String(parsed.template || "").toLowerCase();
+  const template =
+    templateRaw === "focus"
+      ? "focus"
+      : templateRaw === "triptych" || templateRaw === "triple"
+      ? "triptych"
+      : "focus";
+
+  const plan = {
+    template,
+    titleStart: clampNumber(parsed.titleStart, 36, 60, 48),
+    titleMin: clampNumber(parsed.titleMin, 24, 44, 30),
+    bodyStart: clampNumber(parsed.bodyStart, 22, 40, 28),
+    bodyMin: clampNumber(parsed.bodyMin, 16, 30, 20),
+    sectionGap: clampNumber(parsed.sectionGap, 10, 28, 16),
+    lineHeightRatio: clampNumber(parsed.lineHeightRatio, 1.2, 1.55, 1.34),
+  };
+
+  if (plan.titleMin > plan.titleStart) {
+    plan.titleMin = plan.titleStart;
+  }
+  if (plan.bodyMin > plan.bodyStart) {
+    plan.bodyMin = plan.bodyStart;
+  }
+
+  return plan;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, num));
+}
+
+async function getCardLayoutPlan(bundle, mode) {
+  const fallbackPlan = getHeuristicLayoutPlan(bundle, mode, resolveStylePreset().layout || {});
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    return {
+      plan: fallbackPlan,
+      source: "heuristic",
+      reason: "未检测到 API Key",
+    };
+  }
+
+  try {
+    const model = resolveModel();
+    const raw = await requestOneLinkCompletion(buildLayoutMessages(bundle, mode), apiKey, model, {
+      temperature: 0.2,
+      maxTokens: 260,
+    });
+    const parsed = parseLayoutPlan(raw);
+    if (!parsed) {
+      return {
+        plan: fallbackPlan,
+        source: "heuristic",
+        reason: "AI 排版 JSON 解析失败",
+      };
+    }
+    return {
+      plan: parsed,
+      source: "ai",
+      reason: "",
+    };
+  } catch (error) {
+    console.warn("[layout-plan] fallback", error);
+    return {
+      plan: fallbackPlan,
+      source: "heuristic",
+      reason: simplifyErrorMessage(error),
+    };
+  }
+}
+
 function buildCardSchemaTemplate() {
   return {
     identityTag: "string",
@@ -762,7 +927,8 @@ function enforceCardSchema(rawPayload, input) {
   }
 
   const markdownInput = safeText(raw.markdown);
-  bundle.markdown = clipTextWithEllipsis(markdownInput || buildAssistantMarkdown(bundle), CARD_SCHEMA_LIMITS.markdown);
+  bundle.rawMarkdown = clipTextWithEllipsis(markdownInput, CARD_SCHEMA_LIMITS.markdown);
+  bundle.markdown = clipTextWithEllipsis(buildAssistantMarkdown(bundle), CARD_SCHEMA_LIMITS.markdown);
 
   if (!hasRequiredCardFields(bundle)) {
     const mock = buildMockBundle(input);
@@ -1266,17 +1432,31 @@ function buildParodyResult(input) {
 }
 
 function buildAssistantMarkdown(bundle) {
-  const trueLine = bundle.true.empty
-    ? `- **真引**：暂时没检索到可靠原句，怕乱引，先空着。`
-    : `- **真引**：${bundle.true.title}${bundle.true.source ? `（${bundle.true.source}）` : ""}\n  ${bundle.true.desc}`;
+  const trueBlock = bundle.true.empty
+    ? [
+        "#### 真引",
+        "> 暂缺可信原句",
+        `${bundle.true.desc || "这条先不硬引，改用稳妥建议。"}`,
+      ]
+    : [
+        "#### 真引",
+        `> ${bundle.true.title}`,
+        `${bundle.true.desc}`,
+        `出处：${bundle.true.source || "（无）"}`,
+      ];
 
   return [
-    `### 今日判词：${bundle.identityTag}`,
-    `> 把破事说出来，礼法才有用武之地。`,
+    `### ${bundle.identityTag}`,
     "",
-    trueLine,
-    `- **意译**：${bundle.mix.title}\n  ${bundle.mix.desc}`,
-    `- **戏仿**：${bundle.parody.title}\n  ${bundle.parody.desc}`,
+    ...trueBlock,
+    "",
+    "#### 意译",
+    `> ${bundle.mix.title}`,
+    `${bundle.mix.desc}`,
+    "",
+    "#### 戏仿",
+    `> ${bundle.parody.title}`,
+    `${bundle.parody.desc}`,
     "",
     "`#这合乎周礼吗 #可复制 #可截图`",
   ].join("\n");
@@ -1337,83 +1517,262 @@ async function copyToClipboard(text) {
 
 async function exportCardAsPng() {
   const bundle = state.lastBundle;
-  if (!bundle) {
+  if (!bundle || state.isExporting) {
     return;
+  }
+
+  if (typeof JSZip === 'undefined') {
+    setStatus("导出失败：缺少 JSZip 库。", true);
+    return;
+  }
+
+  state.isExporting = true;
+  if (elements.downloadCardBtn) {
+    elements.downloadCardBtn.disabled = true;
   }
 
   const preset = resolveStylePreset();
-  const mode = MODE_META[state.selectedMode] ? state.selectedMode : "mix";
-  const modeLabel = MODE_META[mode].label;
+  showExportOverlay("正在编纂锦囊…");
 
-  const canvas = document.createElement("canvas");
-  canvas.width = EXPORT_SIZE.width;
-  canvas.height = EXPORT_SIZE.height;
-  const ctx = canvas.getContext("2d");
-
-  if (!ctx) {
-    setStatus("导出失败：Canvas 不可用。", true);
-    return;
-  }
-
-  let renderResult = renderCardComposition(ctx, {
-    bundle,
-    mode,
-    modeLabel,
-    preset,
-    backgroundImage: null,
-    useTemplateBackground: true,
-    backgroundSource: "stable_template",
-  });
-
-  let quality = runCardQualityChecks({
-    bundle,
-    canvas,
-    layout: renderResult.layout,
-    preset,
-  });
-
-  if (!quality.passed) {
-    renderResult = renderCardComposition(ctx, {
-      bundle,
-      mode,
-      modeLabel,
-      preset,
-      backgroundImage: null,
-      useTemplateBackground: true,
-      backgroundSource: "stable_template",
-    });
-    quality = runCardQualityChecks({
-      bundle,
-      canvas,
-      layout: renderResult.layout,
-      preset,
-    });
-    setStatus("检测到导出风险，已启用稳定模板。", true);
-  }
-
-  let dataUrl = "";
   try {
-    dataUrl = canvas.toDataURL("image/png");
-  } catch {
-    renderResult = renderCardComposition(ctx, {
-      bundle,
-      mode,
-      modeLabel,
-      preset,
-      backgroundImage: null,
-      useTemplateBackground: true,
-      backgroundSource: "stable_template",
-    });
-    dataUrl = canvas.toDataURL("image/png");
-    setStatus("跨域背景不可导出，已启用稳定模板。", true);
+    const zip = new JSZip();
+    
+    // 1. 生成封面卡
+    updateExportOverlayText("正在绘制封面…");
+    const coverCanvas = document.createElement("canvas");
+    coverCanvas.width = EXPORT_SIZE.width;
+    coverCanvas.height = EXPORT_SIZE.height;
+    const coverCtx = coverCanvas.getContext("2d");
+    renderCoverCard(coverCtx, { bundle, preset, input: state.lastInput });
+    
+    const coverBlob = await new Promise(resolve => coverCanvas.toBlob(resolve, 'image/png'));
+    zip.file("01_封面_处境.png", coverBlob);
+
+    // 2. 生成各模式解答卡
+    const modes = ["true", "mix", "parody"];
+    const modeNames = { "true": "真引", "mix": "意译", "parody": "戏仿" };
+    
+    for (let i = 0; i < modes.length; i++) {
+      const mode = modes[i];
+      updateExportOverlayText(`正在绘制解答（${modeNames[mode]}）…`);
+      
+      const modeCanvas = document.createElement("canvas");
+      modeCanvas.width = EXPORT_SIZE.width;
+      modeCanvas.height = EXPORT_SIZE.height;
+      const modeCtx = modeCanvas.getContext("2d");
+      
+      renderAnswerCard(modeCtx, { bundle, preset, mode, modeLabel: modeNames[mode] });
+      
+      const modeBlob = await new Promise(resolve => modeCanvas.toBlob(resolve, 'image/png'));
+      zip.file(`0${i + 2}_解答_${modeNames[mode]}.png`, modeBlob);
+    }
+
+    // 3. 打包下载
+    updateExportOverlayText("正在封卷打包…");
+    const content = await zip.generateAsync({ type: "blob" });
+    
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(content);
+    link.download = `hehu-zhouli-${Date.now()}.zip`;
+    link.click();
+
+    showToast("多图合集已导出(ZIP)");
+    setStatus("多图合集导出成功。");
+  } catch (error) {
+    console.error("Export zip error:", error);
+    setStatus("导出失败：" + simplifyErrorMessage(error), true);
+  } finally {
+    hideExportOverlay();
+    state.isExporting = false;
+    if (elements.downloadCardBtn) {
+      elements.downloadCardBtn.disabled = false;
+    }
   }
+}
 
-  const link = document.createElement("a");
-  link.href = dataUrl;
-  link.download = `hehu-zhouli-${Date.now()}.png`;
-  link.click();
+function renderBaseTemplate(ctx, preset, x, top) {
+  const palette = preset.palette || {};
+  const width = EXPORT_SIZE.width;
+  const height = EXPORT_SIZE.height;
 
-  showToast("图卡已导出");
+  drawStableTemplateBackground(ctx, preset);
+  drawTexture(ctx, width, height, preset.textureStrength || 0.12);
+
+  ctx.strokeStyle = palette.border || "rgba(248,228,206,0.3)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(62, 62, 956, 1226);
+
+  const brandX = x + 118;
+  const avatarCenterX = x + 34;
+  const avatarCenterY = top - 20;
+  const avatarRadius = 54;
+  drawCardAvatar(ctx, avatarCenterX, avatarCenterY, avatarRadius);
+
+  const fonts = preset.fonts || {};
+  ctx.fillStyle = palette.accent || "#ffe5c6";
+  ctx.font = `700 74px ${fonts.brand || '"Noto Sans SC", sans-serif'}`;
+  ctx.fillText("合乎周礼", brandX, top);
+
+  return brandX;
+}
+
+function renderCoverCard(ctx, { bundle, preset, input }) {
+  const paddings = preset.paddings || {};
+  const x = paddings.x || 96;
+  const top = paddings.top || 160;
+  const brandX = renderBaseTemplate(ctx, preset, x, top);
+  const palette = preset.palette || {};
+  const fonts = preset.fonts || {};
+
+  // 副标题
+  ctx.fillStyle = palette.textSecondary || "#f9dfc4";
+  ctx.font = `500 35px ${fonts.body || '"Noto Sans SC", sans-serif'}`;
+  ctx.fillText("这合乎周礼吗？", brandX, top + 55);
+
+  // 身份标签
+  ctx.font = `500 28px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
+  const tagText = clipTextWithEllipsis(bundle.identityTag, CARD_SCHEMA_LIMITS.identityTag);
+  const tagWidth = ctx.measureText(tagText).width + 52;
+  roundRect(
+    ctx,
+    brandX,
+    top + 88,
+    tagWidth,
+    54,
+    27,
+    palette.accentSoft || "rgba(255,229,198,0.16)",
+    "rgba(255,229,198,0.45)",
+  );
+  ctx.fillStyle = palette.accent || "#ffe8cd";
+  ctx.fillText(tagText, brandX + 24, top + 123);
+
+  // 大字报排版用户输入痛点
+  const contentTop = paddings.contentTop || 380;
+  const contentWidth = EXPORT_SIZE.width - x * 2;
+  const centerX = EXPORT_SIZE.width / 2;
+  const layoutPreset = preset.layout || {};
+
+  const inputFit = fitTextBlock(ctx, `“${input}”`, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.titleMaxLines || 4,
+    startSize: 112, // 封面字体特意调大
+    minSize: 72,
+    lineHeightRatio: layoutPreset.titleLineHeight || 1.15,
+    fontFamily: fonts.title || '"Noto Sans SC", sans-serif',
+    fontWeight: 900,
+  });
+
+  ctx.fillStyle = palette.textPrimary || "#fff4e8";
+  ctx.textAlign = "center";
+  
+  // 计算垂直居中的起始Y坐标
+  const totalContentHeight = inputFit.lines.length * inputFit.lineHeight;
+  const startY = contentTop + 140 + (1210 - (contentTop + 140) - totalContentHeight) / 2;
+  
+  inputFit.lines.forEach((line, index) => {
+    ctx.fillText(line, centerX, startY + index * inputFit.lineHeight);
+  });
+
+  // 底部固定文字
+  ctx.beginPath();
+  ctx.moveTo(x, 1210);
+  ctx.lineTo(EXPORT_SIZE.width - x, 1210);
+  ctx.strokeStyle = "rgba(255,225,190,0.35)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = palette.textSecondary || "#f9ddbe";
+  ctx.font = `500 30px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
+  ctx.textAlign = "left";
+  ctx.fillText("合乎周礼", x, 1270);
+  ctx.textAlign = "center";
+  ctx.fillText("·", centerX, 1270);
+  ctx.textAlign = "right";
+  ctx.fillText("#这合乎周礼吗", EXPORT_SIZE.width - x, 1270);
+  ctx.textAlign = "left"; // reset
+}
+
+function renderAnswerCard(ctx, { bundle, preset, mode, modeLabel }) {
+  const paddings = preset.paddings || {};
+  const x = paddings.x || 96;
+  const top = paddings.top || 160;
+  const brandX = renderBaseTemplate(ctx, preset, x, top);
+  const palette = preset.palette || {};
+  const fonts = preset.fonts || {};
+  const modeColorMap = preset.modeColor || palette.modeColor || {};
+  const titleColor = modeColorMap[mode] || palette.textPrimary;
+
+  // 副标题显示当前模式
+  ctx.fillStyle = titleColor;
+  ctx.font = `700 35px ${fonts.body || '"Noto Sans SC", sans-serif'}`;
+  ctx.fillText(`【 ${modeLabel} 】`, brandX, top + 55);
+
+  const cardMode = bundle[mode] || bundle.mix;
+  const contentTop = paddings.contentTop || 380;
+  const contentWidth = EXPORT_SIZE.width - x * 2;
+  const centerX = EXPORT_SIZE.width / 2;
+  const layoutPreset = preset.layout || {};
+
+  // 大标题
+  const titleFit = fitTextBlock(ctx, cardMode.title, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.titleMaxLines || 4,
+    startSize: 88,
+    minSize: 56,
+    lineHeightRatio: layoutPreset.titleLineHeight || 1.15,
+    fontFamily: fonts.title || '"Noto Sans SC", sans-serif',
+    fontWeight: 900,
+  });
+
+  // 正文与出处
+  const descText = cardMode.source ? `${cardMode.desc}\n\n${cardMode.source}` : cardMode.desc;
+  const descFit = fitTextBlock(ctx, descText, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.bodyMaxLines || 8,
+    startSize: layoutPreset.bodyStart || 48,
+    minSize: layoutPreset.bodyMin || 36,
+    lineHeightRatio: layoutPreset.bodyLineHeight || 1.4,
+    fontFamily: fonts.body || '"Noto Sans SC", sans-serif',
+    fontWeight: 500,
+  });
+
+  // 计算垂直居中的起Y坐标
+  const totalContentHeight = titleFit.lines.length * titleFit.lineHeight + 60 + descFit.lines.length * descFit.lineHeight;
+  let startY = contentTop + 60 + (1210 - (contentTop + 60) - totalContentHeight) / 2;
+
+  // 绘制大标题
+  ctx.fillStyle = titleColor;
+  ctx.textAlign = "center";
+  titleFit.lines.forEach((line, index) => {
+    ctx.fillText(line, centerX, startY + index * titleFit.lineHeight);
+  });
+
+  startY += titleFit.lines.length * titleFit.lineHeight + 60;
+
+  // 绘制正文
+  ctx.fillStyle = palette.textSecondary || "#f4e1cc";
+  ctx.textAlign = "center";
+  descFit.lines.forEach((line, index) => {
+    ctx.fillText(line, centerX, startY + index * descFit.lineHeight);
+  });
+
+  // 底部固定文字
+  ctx.beginPath();
+  ctx.moveTo(x, 1210);
+  ctx.lineTo(EXPORT_SIZE.width - x, 1210);
+  ctx.strokeStyle = "rgba(255,225,190,0.35)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = palette.textSecondary || "#f9ddbe";
+  ctx.font = `500 30px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
+  ctx.textAlign = "left";
+  ctx.fillText(`判词模式：${modeLabel}`, x, 1270);
+  ctx.textAlign = "center";
+  ctx.fillText("·", centerX, 1270);
+  ctx.textAlign = "right";
+  ctx.fillText("#这合乎周礼吗", EXPORT_SIZE.width - x, 1270);
+  ctx.textAlign = "left"; // reset
 }
 
 function renderCardComposition(
@@ -1423,6 +1782,7 @@ function renderCardComposition(
     mode,
     modeLabel,
     preset,
+    layoutPlan = null,
     backgroundImage,
     useTemplateBackground = false,
     backgroundSource = "template",
@@ -1439,6 +1799,8 @@ function renderCardComposition(
   const top = paddings.top || 160;
   const contentTop = paddings.contentTop || 380;
   const contentWidth = width - x * 2;
+  const activePlan =
+    layoutPlan || getHeuristicLayoutPlan(bundle, mode, layoutPreset);
 
   if (!useTemplateBackground && backgroundImage) {
     drawImageCover(ctx, backgroundImage, width, height);
@@ -1452,25 +1814,34 @@ function renderCardComposition(
   }
 
   drawTexture(ctx, width, height, preset.textureStrength || 0.12);
+  drawGlowCircle(ctx, x + 220, top + 20, 130, "rgba(225, 238, 255, 0.14)");
+  drawGlowCircle(ctx, width - 180, top + 50, 110, "rgba(191, 240, 224, 0.12)");
+  drawInkSweep(ctx, x - 12, top - 40, 380, 230);
 
   ctx.strokeStyle = palette.border || "rgba(248,228,206,0.3)";
   ctx.lineWidth = 2;
   ctx.strokeRect(62, 62, 956, 1226);
 
+  const brandX = x + 118;
+  const avatarCenterX = x + 34;
+  const avatarCenterY = top - 20;
+  const avatarRadius = 54;
+  drawCardAvatar(ctx, avatarCenterX, avatarCenterY, avatarRadius);
+
   ctx.fillStyle = palette.accent || "#ffe5c6";
   ctx.font = `700 74px ${fonts.brand || '"Noto Sans SC", sans-serif'}`;
-  ctx.fillText("合乎周礼", x, top);
+  ctx.fillText("合乎周礼", brandX, top);
 
   ctx.fillStyle = palette.textSecondary || "#f9dfc4";
   ctx.font = `500 35px ${fonts.body || '"Noto Sans SC", sans-serif'}`;
-  ctx.fillText("这合乎周礼吗？", x, top + 55);
+  ctx.fillText("这合乎周礼吗？", brandX, top + 55);
 
   ctx.font = `500 28px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
   const tagText = clipTextWithEllipsis(bundle.identityTag, CARD_SCHEMA_LIMITS.identityTag);
   const tagWidth = ctx.measureText(tagText).width + 52;
   roundRect(
     ctx,
-    x,
+    brandX,
     top + 88,
     tagWidth,
     54,
@@ -1479,36 +1850,30 @@ function renderCardComposition(
     "rgba(255,229,198,0.45)",
   );
   ctx.fillStyle = palette.accent || "#ffe8cd";
-  ctx.fillText(tagText, x + 24, top + 123);
-
-  const cardMode = bundle[mode] || bundle.mix || buildMockBundle("默认").mix;
-  const titleFit = fitTextBlock(ctx, cardMode.title, {
-    maxWidth: contentWidth,
-    maxLines: layoutPreset.titleMaxLines || 4,
-    startSize: layoutPreset.titleStart || 56,
-    minSize: layoutPreset.titleMin || 40,
-    lineHeightRatio: layoutPreset.titleLineHeight || 1.22,
-    fontFamily: fonts.title || '"Noto Sans SC", sans-serif',
-    fontWeight: 700,
-  });
-
-  const titleColorMap = preset.modeColor || palette.modeColor || {};
-  ctx.fillStyle = titleColorMap[mode] || palette.textPrimary || "#fff4e8";
-  drawLines(ctx, titleFit.lines, x, contentTop, titleFit.lineHeight);
-
-  const descText = cardMode.source ? `${cardMode.desc}\n${cardMode.source}` : cardMode.desc;
-  const descFit = fitTextBlock(ctx, descText, {
-    maxWidth: contentWidth,
-    maxLines: layoutPreset.bodyMaxLines || 8,
-    startSize: layoutPreset.bodyStart || 36,
-    minSize: layoutPreset.bodyMin || 28,
-    lineHeightRatio: layoutPreset.bodyLineHeight || 1.35,
-    fontFamily: fonts.body || '"Noto Sans SC", sans-serif',
-    fontWeight: 500,
-  });
-
-  ctx.fillStyle = palette.textSecondary || "#f4e1cc";
-  drawLines(ctx, descFit.lines, x, contentTop + titleFit.height + 28, descFit.lineHeight);
+  ctx.fillText(tagText, brandX + 24, top + 123);
+  const bodyRender =
+    activePlan.template === "focus"
+      ? renderFocusCardBody(ctx, {
+          bundle,
+          mode,
+          preset,
+          x,
+          contentTop,
+          contentWidth,
+          fonts,
+          layoutPreset,
+          activePlan,
+        })
+      : renderTripleCardBody(ctx, {
+          bundle,
+          mode,
+          preset,
+          x,
+          contentTop,
+          contentWidth,
+          fonts,
+          activePlan,
+        });
 
   ctx.beginPath();
   ctx.moveTo(x, 1210);
@@ -1519,19 +1884,206 @@ function renderCardComposition(
 
   ctx.fillStyle = palette.textSecondary || "#f9ddbe";
   ctx.font = `500 30px ${fonts.tag || '"Noto Sans SC", sans-serif'}`;
-  ctx.fillText(`模式：${modeLabel}`, x, 1270);
-  ctx.fillText(bundle.generatedAt, 470, 1270);
-  ctx.fillText("HZL · v1", 850, 1270);
+  ctx.textAlign = "left";
+  ctx.fillText(`判词模式：${modeLabel}`, x, 1270);
+  ctx.textAlign = "center";
+  ctx.fillText("·", EXPORT_SIZE.width / 2, 1270);
+  ctx.textAlign = "right";
+  ctx.fillText("#这合乎周礼吗", EXPORT_SIZE.width - x, 1270);
+  ctx.textAlign = "left"; // reset
 
   return {
     layout: {
-      titleFontSize: titleFit.fontSize,
-      bodyFontSize: descFit.fontSize,
-      hasOverflow: titleFit.overflow || descFit.overflow,
+      titleFontSize: bodyRender.titleFontSize,
+      bodyFontSize: bodyRender.bodyFontSize,
+      hasOverflow: bodyRender.hasOverflow,
       backgroundSource,
       mode,
+      template: activePlan.template,
     },
   };
+}
+
+function getHeuristicLayoutPlan(bundle, mode, layoutPreset) {
+  const selected = bundle[mode] || bundle.mix || {};
+  const totalLen =
+    safeText(bundle.true?.title).length +
+    safeText(bundle.true?.desc).length +
+    safeText(bundle.mix?.title).length +
+    safeText(bundle.mix?.desc).length +
+    safeText(bundle.parody?.title).length +
+    safeText(bundle.parody?.desc).length;
+
+  const useTriptych = totalLen <= 320 && safeText(selected?.desc).length <= 118;
+
+  return {
+    template: useTriptych ? "triptych" : "focus",
+    titleStart: layoutPreset.titleStart || 56,
+    titleMin: layoutPreset.titleMin || 40,
+    bodyStart: layoutPreset.bodyStart || 36,
+    bodyMin: layoutPreset.bodyMin || 28,
+    sectionGap: 16,
+    lineHeightRatio: layoutPreset.bodyLineHeight || 1.35,
+  };
+}
+
+function renderFocusCardBody(
+  ctx,
+  { bundle, mode, preset, x, contentTop, contentWidth, fonts, layoutPreset, activePlan },
+) {
+  const cardMode = bundle[mode] || bundle.mix || buildMockBundle("默认").mix;
+  const titleFit = fitTextBlock(ctx, cardMode.title, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.titleMaxLines || 4,
+    startSize: activePlan.titleStart,
+    minSize: activePlan.titleMin,
+    lineHeightRatio: layoutPreset.titleLineHeight || 1.22,
+    fontFamily: fonts.title || '"Noto Sans SC", sans-serif',
+    fontWeight: 700,
+  });
+
+  const titleColorMap = preset.modeColor || (preset.palette && preset.palette.modeColor) || {};
+  const textPrimary = (preset.palette && preset.palette.textPrimary) || "#fff4e8";
+  const textSecondary = (preset.palette && preset.palette.textSecondary) || "#f4e1cc";
+  ctx.fillStyle = titleColorMap[mode] || textPrimary;
+  drawLines(ctx, titleFit.lines, x, contentTop, titleFit.lineHeight);
+
+  const descText = cardMode.source ? `${cardMode.desc}\n${cardMode.source}` : cardMode.desc;
+  const descFit = fitTextBlock(ctx, descText, {
+    maxWidth: contentWidth,
+    maxLines: layoutPreset.bodyMaxLines || 8,
+    startSize: activePlan.bodyStart,
+    minSize: activePlan.bodyMin,
+    lineHeightRatio: activePlan.lineHeightRatio,
+    fontFamily: fonts.body || '"Noto Sans SC", sans-serif',
+    fontWeight: 500,
+  });
+  ctx.fillStyle = textSecondary;
+  drawLines(ctx, descFit.lines, x, contentTop + titleFit.height + 28, descFit.lineHeight);
+
+  return {
+    titleFontSize: titleFit.fontSize,
+    bodyFontSize: descFit.fontSize,
+    hasOverflow: titleFit.overflow || descFit.overflow,
+  };
+}
+
+function renderTripleCardBody(ctx, { bundle, mode, preset, x, contentTop, contentWidth, fonts, activePlan }) {
+  const sections = [
+    { key: "true", title: "真引", data: bundle.true },
+    { key: "mix", title: "意译", data: bundle.mix },
+    { key: "parody", title: "戏仿", data: bundle.parody },
+  ];
+  const textPrimary = (preset.palette && preset.palette.textPrimary) || "#fff4e8";
+  const textSecondary = (preset.palette && preset.palette.textSecondary) || "#f4e1cc";
+  const modeColorMap = (preset.modeColor || (preset.palette && preset.palette.modeColor) || {});
+  const sectionGap = activePlan.sectionGap;
+  let cursorY = contentTop;
+  let hasOverflow = false;
+  let minBodyFont = activePlan.bodyStart;
+  const sectionHeights = { true: 292, mix: 242, parody: 242 };
+
+  sections.forEach((section) => {
+    const isActive = section.key === mode;
+    const boxHeight = sectionHeights[section.key] || 236;
+    drawSectionCard(ctx, x, cursorY, contentWidth, boxHeight, isActive);
+
+    ctx.fillStyle = isActive ? modeColorMap[section.key] || textPrimary : textPrimary;
+    ctx.font = `700 ${isActive ? 34 : 30}px ${fonts.title || '"Noto Sans SC", sans-serif'}`;
+    ctx.fillText(section.title, x + 24, cursorY + 52);
+
+    const titleFit = fitTextBlock(ctx, safeText(section.data?.title), {
+      maxWidth: contentWidth - 48,
+      maxLines: 2,
+      startSize: activePlan.titleStart - 10,
+      minSize: Math.max(22, activePlan.titleMin - 6),
+      lineHeightRatio: 1.2,
+      fontFamily: fonts.title || '"Noto Sans SC", sans-serif',
+      fontWeight: 700,
+    });
+    ctx.fillStyle = textPrimary;
+    drawLines(ctx, titleFit.lines, x + 24, cursorY + 94, titleFit.lineHeight);
+
+    const bodyText = section.key === "true" && section.data?.source
+      ? `${safeText(section.data?.desc)}\n${safeText(section.data?.source)}`
+      : safeText(section.data?.desc);
+    const bodyFit = fitTextBlock(ctx, bodyText, {
+      maxWidth: contentWidth - 48,
+      maxLines: section.key === "true" ? 5 : 4,
+      startSize: activePlan.bodyStart - 6,
+      minSize: activePlan.bodyMin,
+      lineHeightRatio: activePlan.lineHeightRatio,
+      fontFamily: fonts.body || '"Noto Sans SC", sans-serif',
+      fontWeight: 500,
+    });
+    ctx.fillStyle = textSecondary;
+    drawLines(ctx, bodyFit.lines, x + 24, cursorY + 94 + titleFit.height + 14, bodyFit.lineHeight);
+
+    hasOverflow = hasOverflow || titleFit.overflow || bodyFit.overflow;
+    minBodyFont = Math.min(minBodyFont, bodyFit.fontSize);
+    cursorY += boxHeight + sectionGap;
+  });
+
+  if (cursorY > 1160) {
+    hasOverflow = true;
+  }
+
+  return {
+    titleFontSize: activePlan.titleStart - 10,
+    bodyFontSize: minBodyFont,
+    hasOverflow,
+  };
+}
+
+function showExportOverlay(text) {
+  let overlay = state.exportOverlayEl;
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.className = "export-overlay";
+    overlay.innerHTML = `
+      <div class="export-overlay-card" role="status" aria-live="polite">
+        <span class="export-ring" aria-hidden="true"></span>
+        <p data-export-text>${escapeHtml(text || "正在生成图卡…")}</p>
+        <span class="export-progress" aria-hidden="true"></span>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    state.exportOverlayEl = overlay;
+  } else {
+    const textEl = overlay.querySelector("[data-export-text]");
+    if (textEl) {
+      textEl.textContent = text || "正在生成图卡…";
+    }
+  }
+  overlay.classList.add("is-visible");
+}
+
+function updateExportOverlayText(text) {
+  if (!state.exportOverlayEl) {
+    return;
+  }
+  const textEl = state.exportOverlayEl.querySelector("[data-export-text]");
+  if (textEl) {
+    textEl.textContent = text || "正在生成图卡…";
+  }
+}
+
+function hideExportOverlay() {
+  if (!state.exportOverlayEl) {
+    return;
+  }
+  state.exportOverlayEl.classList.remove("is-visible");
+  const el = state.exportOverlayEl;
+  state.exportOverlayEl = null;
+  window.setTimeout(() => {
+    el.remove();
+  }, 160);
+}
+
+function drawSectionCard(ctx, x, y, w, h, active) {
+  const bg = active ? "rgba(255,239,210,0.12)" : "rgba(255,255,255,0.05)";
+  const border = active ? "rgba(255,224,182,0.55)" : "rgba(255,255,255,0.18)";
+  roundRect(ctx, x, y, w, h, 18, bg, border);
 }
 
 function fitTextBlock(
@@ -1657,7 +2209,7 @@ function drawTexture(ctx, width, height, strength) {
 function runCardQualityChecks({ bundle, canvas, layout, preset }) {
   const checks = {
     noOverflow: !layout.hasOverflow,
-    bodyFontMin: layout.bodyFontSize >= 28,
+    bodyFontMin: layout.bodyFontSize >= 20,
     contrast: calculateContrastRatio(
       preset.palette?.textPrimary || "#fff4e8",
       preset.palette?.bgTop || "#1f3f3a",
@@ -1724,6 +2276,61 @@ function drawGlowCircle(ctx, x, y, radius, color) {
   radial.addColorStop(1, "rgba(0,0,0,0)");
   ctx.fillStyle = radial;
   ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+}
+
+function drawInkSweep(ctx, x, y, width, height) {
+  ctx.save();
+  const gradient = ctx.createLinearGradient(x, y, x + width, y + height);
+  gradient.addColorStop(0, "rgba(255,236,205,0.2)");
+  gradient.addColorStop(0.5, "rgba(255,236,205,0.08)");
+  gradient.addColorStop(1, "rgba(255,236,205,0)");
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.moveTo(x, y + 28);
+  ctx.quadraticCurveTo(x + width * 0.45, y - 18, x + width, y + 24);
+  ctx.lineTo(x + width, y + height);
+  ctx.lineTo(x, y + height);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawCardAvatar(ctx, centerX, centerY, radius) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.clip();
+
+  if (typeof drawCardAvatar.image === "undefined") {
+    const img = new Image();
+    img.src = "./confucius.jpg";
+    drawCardAvatar.image = img;
+  }
+
+  const avatarImage = drawCardAvatar.image;
+  if (avatarImage && avatarImage.complete && avatarImage.naturalWidth > 0) {
+    ctx.drawImage(avatarImage, centerX - radius, centerY - radius, radius * 2, radius * 2);
+  } else {
+    const gradient = ctx.createLinearGradient(centerX - radius, centerY - radius, centerX + radius, centerY + radius);
+    gradient.addColorStop(0, "#e8d3b0");
+    gradient.addColorStop(1, "#b08b58");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(centerX - radius, centerY - radius, radius * 2, radius * 2);
+  }
+  ctx.restore();
+
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,233,202,0.9)";
+  ctx.lineWidth = 4;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius + 5, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,233,202,0.35)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
 }
 
 function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
@@ -1801,6 +2408,13 @@ function renderMarkdown(markdown) {
     if (!trimmed) {
       closeLists();
       flushParagraph();
+      continue;
+    }
+
+    if (/^-{3,}$/.test(trimmed)) {
+      closeLists();
+      flushParagraph();
+      html.push("<hr />");
       continue;
     }
 
