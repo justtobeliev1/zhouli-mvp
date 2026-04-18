@@ -26,3 +26,6 @@ coverage/
 # Local editor config
 .idea/
 .vscode/
+
+# Local runtime secrets (machine-only)
+local-runtime.js
